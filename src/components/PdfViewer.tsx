@@ -44,6 +44,7 @@ export function PdfViewer({ open, file, currentDir, onClose, onExtracted, onRena
   const [fileNameModalOpen, setFileNameModalOpen] = useState(false)
   const [renameModalOpen, setRenameModalOpen] = useState(false)
   const [zoom, setZoom] = useState(600)
+  const [pendingExtract, setPendingExtract] = useState<{ fileName: string; pages: number[] } | null>(null)
 
   // Internal file state - survives temporary null prop during rename/refresh
   const [viewerFile, setViewerFile] = useState<FileItem | null>(null)
@@ -88,6 +89,7 @@ export function PdfViewer({ open, file, currentDir, onClose, onExtracted, onRena
       setSelectedPages([])
       setActivePage(1)
       setFileNameModalOpen(false)
+      setPendingExtract(null)
       setZoom(600)
 
       if (pdfDocRef.current) {
@@ -225,14 +227,17 @@ export function PdfViewer({ open, file, currentDir, onClose, onExtracted, onRena
     if (!open) return
 
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape' && !fileNameModalOpen && !renameModalOpen) {
+      if (e.key === 'Escape' && !fileNameModalOpen && !renameModalOpen && !pendingExtract) {
         onClose()
+      }
+      if (e.key === 'Escape' && pendingExtract) {
+        setPendingExtract(null)
       }
     }
 
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [open, onClose, fileNameModalOpen, renameModalOpen])
+  }, [open, onClose, fileNameModalOpen, renameModalOpen, pendingExtract])
 
   // Ctrl+Scroll to zoom
   useEffect(() => {
@@ -295,27 +300,34 @@ export function PdfViewer({ open, file, currentDir, onClose, onExtracted, onRena
     setFileNameModalOpen(true)
   }
 
-  const handleExtractConfirm = async (fileName: string) => {
+  const handleExtractConfirm = (fileName: string) => {
     if (!viewerFile) return
 
     setFileNameModalOpen(false)
+    const sortedPages = [...selectedPages].sort((a, b) => a - b)
+
+    if (selectedPages.length < pageCount) {
+      // Partial selection — show confirmation before deciding destructive vs non-destructive
+      setPendingExtract({ fileName, pages: sortedPages })
+    } else {
+      // Full selection — always non-destructive
+      void doExtract(fileName, sortedPages, false)
+    }
+  }
+
+  const doExtract = async (fileName: string, sortedPages: number[], destructive: boolean) => {
+    if (!viewerFile) return
+
+    setPendingExtract(null)
     setExtracting(true)
     setError(null)
     setSuccess(null)
 
     try {
-      const sortedPages = [...selectedPages].sort((a, b) => a - b)
       const dir = currentDir || getFileDirectory(viewerFile.path)
       const outputPath = toCustomNamePdfPath(dir, fileName)
 
-      if (selectedPages.length === pageCount) {
-        await invoke('extract_pdf_pages', {
-          inputPath: viewerFile.path,
-          pages: sortedPages,
-          outputPath,
-        })
-        setSuccess(`${sortedPages.length}개 페이지를 추출했습니다: ${fileName}`)
-      } else {
+      if (destructive) {
         const result = await invoke<ExtractAndRemoveResult>('extract_and_remove_pdf_pages', {
           inputPath: viewerFile.path,
           pages: sortedPages,
@@ -323,6 +335,13 @@ export function PdfViewer({ open, file, currentDir, onClose, onExtracted, onRena
         })
         setSuccess(`${result.extractedCount}개 페이지를 추출하고, 원본에 ${result.remainingCount}개 페이지가 남았습니다.`)
         onExtracted()
+      } else {
+        await invoke('extract_pdf_pages', {
+          inputPath: viewerFile.path,
+          pages: sortedPages,
+          outputPath,
+        })
+        setSuccess(`${sortedPages.length}개 페이지를 추출했습니다: ${fileName}`)
       }
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
@@ -412,9 +431,20 @@ export function PdfViewer({ open, file, currentDir, onClose, onExtracted, onRena
                     key={pageNumber}
                     ref={(el) => { thumbRefs.current[pageNumber] = el }}
                     className={`pdf-thumb-card ${selected ? 'selected' : ''} ${active ? 'active' : ''}`}
+                    tabIndex={0}
+                    role="option"
+                    aria-selected={selected}
+                    aria-label={`페이지 ${pageNumber}`}
                     onClick={() => {
                       togglePage(pageNumber)
                       scrollToPage(pageNumber)
+                    }}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' || e.key === ' ') {
+                        e.preventDefault()
+                        togglePage(pageNumber)
+                        scrollToPage(pageNumber)
+                      }
                     }}
                   >
                     {selected && orderNum > 0 && <span className="selection-badge">{orderNum}</span>}
@@ -476,7 +506,7 @@ export function PdfViewer({ open, file, currentDir, onClose, onExtracted, onRena
         open={fileNameModalOpen}
         title="추출 파일 이름"
         defaultName={defaultExtractName}
-        onConfirm={(name) => void handleExtractConfirm(name)}
+        onConfirm={handleExtractConfirm}
         onCancel={() => setFileNameModalOpen(false)}
       />
 
@@ -487,6 +517,46 @@ export function PdfViewer({ open, file, currentDir, onClose, onExtracted, onRena
         onConfirm={(name) => void handleRenameConfirm(name)}
         onCancel={() => setRenameModalOpen(false)}
       />
+
+      {pendingExtract && (
+        <div className="modal-overlay" role="dialog" aria-modal="true" aria-label="추출 확인" style={{ zIndex: 50 }}>
+          <div
+            style={{
+              width: 'min(440px, 90vw)',
+              borderRadius: 14,
+              border: '1px solid var(--border)',
+              background: '#ffffff',
+              boxShadow: 'var(--shadow)',
+              padding: 20,
+              display: 'flex',
+              flexDirection: 'column',
+              gap: 16,
+            }}
+          >
+            <h3 style={{ margin: 0, fontSize: 16, fontWeight: 600 }}>추출 확인</h3>
+            <p style={{ margin: 0, fontSize: 14, color: 'var(--fg)' }}>
+              선택한 페이지를 추출하고 원본에서 제거하시겠습니까?
+            </p>
+            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
+              <button className="ghost" onClick={() => setPendingExtract(null)}>
+                취소
+              </button>
+              <button
+                className="ghost"
+                onClick={() => void doExtract(pendingExtract.fileName, pendingExtract.pages, false)}
+              >
+                추출만
+              </button>
+              <button
+                className="primary"
+                onClick={() => void doExtract(pendingExtract.fileName, pendingExtract.pages, true)}
+              >
+                추출 및 제거
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

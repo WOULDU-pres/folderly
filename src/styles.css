@@ -11,6 +11,70 @@
   --accent-soft: #e8f0fe;
   --danger: #b4232f;
   --shadow: 0 10px 28px rgba(0, 0, 0, 0.08);
+
+  --bg-body: #eef1f5;
+  --bg-sidebar: #f7f7f7;
+  --bg-card: #ffffff;
+  --bg-selected: #ddeafe;
+  --bg-selected-strong: #dce9ff;
+  --bg-gallery-selected: #edf4ff;
+  --border-light: #f0f2f6;
+  --border-selected: #b8cdf7;
+  --border-gallery-selected: #a8c4fb;
+  --text-pane-title: #3c4148;
+  --text-table-head: #636974;
+  --text-bookmark-remove: #6f7784;
+  --bg-skeleton: linear-gradient(90deg, #f0f0f0 25%, #e8e8e8 50%, #f0f0f0 75%);
+  --bg-pdf-reading: #eef1f5;
+  --bg-pdf-sidebar: #f7f8fa;
+  --bg-merge-panel: #f9fafc;
+  --bg-bookmark-chip: #f9fafc;
+  --bg-gallery-thumb: #fafafa;
+  --bg-active-thumb: #f0f4ff;
+  --success: #0f7e4f;
+  --error-bg: #fff2f4;
+  --error-border: #e8b6bc;
+  --modal-backdrop: rgba(0, 0, 0, 0.34);
+  --shadow-card: 0 2px 8px rgba(0, 0, 0, 0.06);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg-window: #1e1e1e;
+    --bg-pane: #252526;
+    --bg-hover: #2a2d2e;
+    --bg-body: #1a1a1a;
+    --bg-sidebar: #252526;
+    --bg-card: #2d2d2d;
+    --bg-selected: #264f78;
+    --bg-selected-strong: #264f78;
+    --bg-gallery-selected: #1e3a5f;
+    --border: #3c3c3c;
+    --border-light: #333333;
+    --border-selected: #4080bf;
+    --border-gallery-selected: #4080bf;
+    --text: #cccccc;
+    --text-pane-title: #cccccc;
+    --text-table-head: #999999;
+    --text-bookmark-remove: #999999;
+    --muted: #8b8b8b;
+    --accent: #4da6ff;
+    --accent-soft: #1e3a5f;
+    --danger: #f14c4c;
+    --success: #4ec9b0;
+    --shadow: 0 10px 28px rgba(0, 0, 0, 0.3);
+    --shadow-card: 0 2px 8px rgba(0, 0, 0, 0.2);
+    --bg-skeleton: linear-gradient(90deg, #333 25%, #3a3a3a 50%, #333 75%);
+    --bg-pdf-reading: #1a1a1a;
+    --bg-pdf-sidebar: #252526;
+    --bg-merge-panel: #2d2d2d;
+    --bg-bookmark-chip: #2d2d2d;
+    --bg-gallery-thumb: #333333;
+    --bg-active-thumb: #1e3a5f;
+    --error-bg: #3b1d1d;
+    --error-border: #6b3030;
+    --modal-backdrop: rgba(0, 0, 0, 0.6);
+  }
 }
 
 * {
@@ -19,7 +83,7 @@
 
 body {
   margin: 0;
-  background: #eef1f5;
+  background: var(--bg-body);
   color: var(--text);
   font-family: 'Pretendard Variable', 'Pretendard', 'Segoe UI Variable Text', 'Segoe UI', sans-serif;
   font-size: 14px;
@@ -44,7 +108,7 @@ select {
   gap: 14px;
   padding: 0 14px;
   border-bottom: 1px solid var(--border);
-  background: #ffffff;
+  background: var(--bg-card);
 }
 
 .window-header h1 {
@@ -93,7 +157,7 @@ select {
 }
 
 .breadcrumb-sep {
-  color: #767b85;
+  color: var(--muted);
   font-size: 12px;
   margin: 0 1px;
 }
@@ -104,7 +168,7 @@ select {
   gap: 10px;
   padding: 8px 12px;
   border-bottom: 1px solid var(--border);
-  background: #ffffff;
+  background: var(--bg-card);
   flex-wrap: nowrap;
   overflow-x: auto;
 }
@@ -114,7 +178,7 @@ select {
   padding: 0 12px;
   border-radius: 8px;
   border: 1px solid transparent;
-  background: #ffffff;
+  background: var(--bg-card);
   display: inline-flex;
   align-items: center;
   gap: 6px;
@@ -129,7 +193,7 @@ select {
 
 .win-btn.active {
   background: var(--accent-soft);
-  border-color: #b8cdf7;
+  border-color: var(--border-selected);
   color: var(--accent);
 }
 
@@ -155,7 +219,7 @@ select {
   height: 34px;
   border-radius: 8px;
   border: 1px solid var(--border);
-  background: #ffffff;
+  background: var(--bg-card);
   padding: 0 10px;
 }
 
@@ -165,7 +229,7 @@ select {
   border: 1px solid var(--border);
   border-radius: 9px;
   overflow: hidden;
-  background: #ffffff;
+  background: var(--bg-card);
 }
 
 .quick-actions {
@@ -179,7 +243,7 @@ select {
   border: 0;
   border-right: 1px solid var(--border);
   padding: 0 11px;
-  background: #ffffff;
+  background: var(--bg-card);
   display: inline-flex;
   align-items: center;
   gap: 5px;
@@ -202,7 +266,7 @@ select {
   gap: 8px;
   padding: 6px 12px;
   border-bottom: 1px solid var(--border);
-  background: #ffffff;
+  background: var(--bg-card);
   overflow-x: auto;
 }
 
@@ -214,7 +278,7 @@ select {
 }
 
 .bookmark-empty {
-  color: #6b7280;
+  color: var(--muted);
   font-size: 12px;
 }
 
@@ -223,7 +287,7 @@ select {
   align-items: center;
   border: 1px solid var(--border);
   border-radius: 999px;
-  background: #f9fafc;
+  background: var(--bg-bookmark-chip);
 }
 
 .bookmark-link {
@@ -244,7 +308,7 @@ select {
   display: inline-grid;
   place-items: center;
   cursor: pointer;
-  color: #6f7784;
+  color: var(--text-bookmark-remove);
 }
 
 .explorer-layout {
@@ -255,7 +319,7 @@ select {
 
 .sidebar {
   border-right: 1px solid var(--border);
-  background: #f7f7f7;
+  background: var(--bg-sidebar);
   display: flex;
   flex-direction: column;
   min-height: 0;
@@ -264,7 +328,7 @@ select {
 .pane-title {
   padding: 10px 12px;
   font-weight: 600;
-  color: #3c4148;
+  color: var(--text-pane-title);
   border-bottom: 1px solid var(--border);
 }
 
@@ -296,8 +360,8 @@ select {
 }
 
 .drive-btn.active {
-  background: #ddeafe;
-  border-color: #b8cdf7;
+  background: var(--bg-selected);
+  border-color: var(--border-selected);
   color: var(--accent);
 }
 
@@ -332,7 +396,7 @@ select {
 }
 
 .sidebar-row.selected {
-  background: #ddeafe;
+  background: var(--bg-selected);
 }
 
 .drag-handle {
@@ -399,7 +463,7 @@ select {
 .table-head {
   height: 36px;
   border-bottom: 1px solid var(--border);
-  color: #636974;
+  color: var(--text-table-head);
   font-size: 12px;
 }
 
@@ -412,7 +476,7 @@ select {
 
 .table-row {
   height: 40px;
-  border-bottom: 1px solid #f0f2f6;
+  border-bottom: 1px solid var(--border-light);
   cursor: pointer;
 }
 
@@ -421,7 +485,7 @@ select {
 }
 
 .table-row.selected {
-  background: #dce9ff;
+  background: var(--bg-selected-strong);
 }
 
 .name-cell {
@@ -443,7 +507,7 @@ select {
   background: transparent;
   display: inline-grid;
   place-items: center;
-  color: #6f7784;
+  color: var(--text-bookmark-remove);
 }
 
 .file-drag-handle.hidden {
@@ -461,7 +525,7 @@ select {
 .gallery-card {
   border: 1px solid var(--border);
   border-radius: 10px;
-  background: #fff;
+  background: var(--bg-card);
   padding: 8px;
   display: grid;
   gap: 6px;
@@ -470,8 +534,8 @@ select {
 }
 
 .gallery-card.selected {
-  border-color: #a8c4fb;
-  background: #edf4ff;
+  border-color: var(--border-gallery-selected);
+  background: var(--bg-gallery-selected);
 }
 
 .gallery-thumb {
@@ -480,7 +544,7 @@ select {
   border-radius: 8px;
   display: grid;
   place-items: center;
-  background: #fafafa;
+  background: var(--bg-gallery-thumb);
   overflow: hidden;
 }
 
@@ -520,8 +584,8 @@ select {
   bottom: 16px;
   padding: 10px 12px;
   border-radius: 8px;
-  border: 1px solid #e8b6bc;
-  background: #fff2f4;
+  border: 1px solid var(--error-border);
+  background: var(--error-bg);
   color: var(--danger);
   box-shadow: var(--shadow);
 }
@@ -529,7 +593,7 @@ select {
 .modal-overlay {
   position: fixed;
   inset: 0;
-  background: rgba(0, 0, 0, 0.34);
+  background: var(--modal-backdrop);
   display: grid;
   place-items: center;
   padding: 20px;
@@ -541,7 +605,7 @@ select {
   height: min(82vh, 760px);
   border-radius: 14px;
   border: 1px solid var(--border);
-  background: #ffffff;
+  background: var(--bg-card);
   box-shadow: var(--shadow);
   display: grid;
   grid-template-rows: auto auto 1fr auto auto;
@@ -586,7 +650,7 @@ select {
   inset: 12px;
   border-radius: 14px;
   border: 1px solid var(--border);
-  background: #ffffff;
+  background: var(--bg-card);
   box-shadow: var(--shadow);
   display: grid;
   grid-template-rows: auto auto 1fr auto;
@@ -603,7 +667,7 @@ select {
 
 .pdf-sidebar {
   border-right: 1px solid var(--border);
-  background: #f7f8fa;
+  background: var(--bg-pdf-sidebar);
   overflow-y: auto;
   padding: 8px;
   display: flex;
@@ -618,7 +682,7 @@ select {
   flex-direction: column;
   align-items: center;
   gap: 20px;
-  background: #eef1f5;
+  background: var(--bg-pdf-reading);
 }
 
 /* Thumbnail card with selection animation */
@@ -645,7 +709,7 @@ select {
 }
 
 .pdf-thumb-card.active {
-  background: #f0f4ff;
+  background: var(--bg-active-thumb);
   border-color: var(--border);
 }
 
@@ -684,10 +748,10 @@ select {
 
 /* Large preview page */
 .pdf-large-page {
-  background: #fff;
+  background: var(--bg-card);
   border: 1px solid var(--border);
   border-radius: 8px;
-  box-shadow: 0 2px 8px rgba(0,0,0,0.06);
+  box-shadow: var(--shadow-card);
   overflow: hidden;
   position: relative;
   flex-shrink: 0;
@@ -723,7 +787,7 @@ select {
 .pdf-page-skeleton {
   width: 100%;
   aspect-ratio: 210 / 297;
-  background: linear-gradient(90deg, #f0f0f0 25%, #e8e8e8 50%, #f0f0f0 75%);
+  background: var(--bg-skeleton);
   background-size: 200% 100%;
   animation: skeleton-shimmer 1.5s infinite;
   border-radius: 8px;
@@ -756,7 +820,7 @@ select {
 .pdf-merge-panel {
   padding: 8px 16px 12px;
   border-top: 1px solid var(--border);
-  background: #f9fafc;
+  background: var(--bg-merge-panel);
 }
 
 .pdf-merge-header {
@@ -782,7 +846,7 @@ select {
   justify-content: space-between;
   padding: 4px 8px;
   border-radius: 6px;
-  background: #fff;
+  background: var(--bg-card);
   border: 1px solid var(--border);
   font-size: 12px;
 }
@@ -815,7 +879,7 @@ select {
 }
 
 .ghost {
-  background: #fff;
+  background: var(--bg-card);
   border-color: var(--border);
 }
 
@@ -836,7 +900,7 @@ select {
 }
 
 .success {
-  color: #0f7e4f;
+  color: var(--success);
 }
 
 /* --- Accessibility: focus-visible styles --- */

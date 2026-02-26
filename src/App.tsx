@@ -41,15 +41,16 @@ import {
 
 import { PdfViewer } from './components/PdfViewer'
 import { PdfMergeModal } from './components/PdfMergeModal'
-import { BookmarkItem, DriveItem, FileItem, FolderItem, OrderMode, SortMode, ViewMode } from './types'
+import { FileNameModal } from './components/FileNameModal'
+import { SearchBar } from './components/SearchBar'
+import { ContextMenu, type ContextMenuItem } from './components/ContextMenu'
+import { BookmarkItem, DriveItem, FileItem, FolderItem, OrderMode, SortMode } from './types'
 import { mergeManualOrder, sortFiles, sortFolders } from './utils/folderOrder'
 import { extLabel, formatBytes, formatDate } from './utils/format'
+import { useExplorerStore, type ExplorerEntry } from './store/useExplorerStore'
 
 const BOOKMARK_STORAGE_KEY = 'explorer.bookmarks.v1'
 const ENTRY_DRAG_MIME = 'application/x-windows-explorer-paths'
-
-type ExplorerEntry = ({ kind: 'folder' } & FolderItem) | ({ kind: 'file' } & FileItem)
-type ClipboardState = { mode: 'copy' | 'cut'; paths: string[] } | null
 
 type SortableFolderRowProps = {
   folder: FolderItem
@@ -106,8 +107,18 @@ function SortableFolderRow({
       ref={setNodeRef}
       style={style}
       className={`sidebar-row ${selected ? 'selected' : ''} ${folder.isHidden ? 'hidden-entry' : ''}`}
+      role="option"
+      aria-selected={selected}
+      tabIndex={0}
       onClick={() => onClick(folder)}
       onDoubleClick={() => onDoubleClick(folder)}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault()
+          if (e.key === 'Enter') onDoubleClick(folder)
+          else onClick(folder)
+        }
+      }}
       onDragOver={(event) => event.preventDefault()}
       onDrop={(event) => {
         event.preventDefault()
@@ -143,9 +154,10 @@ type SortableEntryRowProps = {
   onSelect: (entry: ExplorerEntry, modifiers: SelectModifiers) => void
   onOpen: (entry: ExplorerEntry) => void
   onDropEntries: (paths: string[], destinationPath: string, copyMode: boolean) => void
+  onContextMenu?: (e: React.MouseEvent, entry: ExplorerEntry) => void
 }
 
-function SortableEntryRow({ entry, selected, manualMode, dragPaths, isCut, onSelect, onOpen, onDropEntries }: SortableEntryRowProps) {
+function SortableEntryRow({ entry, selected, manualMode, dragPaths, isCut, onSelect, onOpen, onDropEntries, onContextMenu }: SortableEntryRowProps) {
   const { attributes, listeners, setNodeRef, setActivatorNodeRef, transform, transition } = useSortable({
     id: entry.id,
     disabled: !manualMode,
@@ -161,6 +173,9 @@ function SortableEntryRow({ entry, selected, manualMode, dragPaths, isCut, onSel
       ref={setNodeRef}
       style={style}
       className={`table-row ${selected ? 'selected' : ''} ${entry.isHidden ? 'hidden-entry' : ''} ${isCut ? 'cut-entry' : ''}`}
+      role="row"
+      aria-selected={selected}
+      tabIndex={0}
       draggable={!manualMode}
       onDragStart={(event) => writeDragPayload(event, selected && dragPaths.length > 0 ? dragPaths : [entry.path])}
       onDragOver={(event) => {
@@ -177,8 +192,18 @@ function SortableEntryRow({ entry, selected, manualMode, dragPaths, isCut, onSel
       }}
       onClick={(e) => onSelect(entry, { ctrl: e.ctrlKey || e.metaKey, shift: e.shiftKey })}
       onDoubleClick={() => onOpen(entry)}
+      onContextMenu={(e) => onContextMenu?.(e, entry)}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter') {
+          e.preventDefault()
+          onOpen(entry)
+        } else if (e.key === ' ') {
+          e.preventDefault()
+          onSelect(entry, { ctrl: e.ctrlKey || e.metaKey, shift: e.shiftKey })
+        }
+      }}
     >
-      <span>
+      <span role="gridcell">
         <button
           ref={setActivatorNodeRef}
           className={`file-drag-handle ${manualMode ? '' : 'hidden'}`}
@@ -190,13 +215,13 @@ function SortableEntryRow({ entry, selected, manualMode, dragPaths, isCut, onSel
           <GripVertical size={14} />
         </button>
       </span>
-      <span className="name-cell">
+      <span role="gridcell" className="name-cell">
         {entry.kind === 'folder' ? <Folder size={16} /> : entry.ext === 'pdf' ? <FileText size={16} /> : <File size={16} />}
         {entry.name}
       </span>
-      <span>{entry.kind === 'folder' ? '폴더' : extLabel(entry.ext)}</span>
-      <span>{entry.kind === 'folder' ? '-' : formatBytes(entry.size)}</span>
-      <span>{formatDate(entry.modifiedAt)}</span>
+      <span role="gridcell">{entry.kind === 'folder' ? '폴더' : extLabel(entry.ext)}</span>
+      <span role="gridcell">{entry.kind === 'folder' ? '-' : formatBytes(entry.size)}</span>
+      <span role="gridcell">{formatDate(entry.modifiedAt)}</span>
     </li>
   )
 }
@@ -269,37 +294,50 @@ export default function App() {
   const clickTimerRef = useRef<number | null>(null)
   const operationToastTimerRef = useRef<number | null>(null)
 
-  const [currentPath, setCurrentPath] = useState('')
-  const [previewPath, setPreviewPath] = useState('')
-  const [drives, setDrives] = useState<DriveItem[]>([])
-  const [quickAccess, setQuickAccess] = useState<DriveItem[]>([])
-  const [bookmarks, setBookmarks] = useState<BookmarkItem[]>([])
+  const {
+    currentPath, setCurrentPath,
+    previewPath, setPreviewPath,
+    drives, setDrives,
+    quickAccess, setQuickAccess,
+    bookmarks, setBookmarks,
+    folders, setFolders,
+    previewFolders, setPreviewFolders,
+    previewFiles, setPreviewFiles,
+    selectedFolderId, setSelectedFolderId,
+    selectedEntryIds, setSelectedEntryIds,
+    clipboard, setClipboard,
+    sortMode, setSortMode,
+    viewMode, setViewMode,
+    orderMode, setOrderMode,
+    folderManualOrderIds, setFolderManualOrderIds,
+    entryManualOrderIds, setEntryManualOrderIds,
+    error, setError,
+    operationInProgress, setOperationInProgress,
+    operationStatus, setOperationStatus,
+    actionInProgress, setActionInProgress,
+  } = useExplorerStore()
 
-  const [folders, setFolders] = useState<FolderItem[]>([])
-  const [previewFolders, setPreviewFolders] = useState<FolderItem[]>([])
-  const [previewFiles, setPreviewFiles] = useState<FileItem[]>([])
-
-  const [selectedFolderId, setSelectedFolderId] = useState<string | null>(null)
-  const [selectedEntryIds, setSelectedEntryIds] = useState<string[]>([])
   const lastClickedIndexRef = useRef<number>(-1)
-  const [clipboard, setClipboard] = useState<ClipboardState>(null)
-
-  const [sortMode, setSortMode] = useState<SortMode>('name')
-  const [viewMode, setViewMode] = useState<ViewMode>('list')
-  const [orderMode, setOrderMode] = useState<OrderMode>('auto')
-  const [folderManualOrderIds, setFolderManualOrderIds] = useState<string[]>([])
-  const [entryManualOrderIds, setEntryManualOrderIds] = useState<string[]>([])
 
   const [folderLoading, setFolderLoading] = useState(false)
   const [previewLoading, setPreviewLoading] = useState(false)
-  const [error, setError] = useState<string | null>(null)
-  const [operationInProgress, setOperationInProgress] = useState(false)
-  const [operationStatus, setOperationStatus] = useState<string | null>(null)
   const [activeDragId, setActiveDragId] = useState<string | null>(null)
-  const [actionInProgress, setActionInProgress] = useState(false)
 
   const [pdfModalOpen, setPdfModalOpen] = useState(false)
   const [mergePdfModalOpen, setMergePdfModalOpen] = useState(false)
+
+  // Phase B1: Rename modal state
+  const [renameModalOpen, setRenameModalOpen] = useState(false)
+  const [renameTarget, setRenameTarget] = useState<ExplorerEntry | null>(null)
+
+  // Phase B1: Create folder modal state
+  const [createFolderModalOpen, setCreateFolderModalOpen] = useState(false)
+
+  // Phase F1: Search filter
+  const [searchQuery, setSearchQuery] = useState('')
+
+  // Phase E1: Context menu
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null)
 
   const sortedFolders = useMemo(() => sortFolders(folders, sortMode), [folders, sortMode])
   const displayFolders = useMemo(
@@ -319,10 +357,16 @@ export default function App() {
     return [...folderEntries, ...fileEntries]
   }, [previewFolders, previewFiles, sortMode])
 
-  const displayEntries = useMemo(
+  const orderedEntries = useMemo(
     () => (orderMode === 'manual' ? mergeManualOrder(autoSortedEntries, entryManualOrderIds) : autoSortedEntries),
     [autoSortedEntries, orderMode, entryManualOrderIds],
   )
+
+  const displayEntries = useMemo(() => {
+    if (!searchQuery.trim()) return orderedEntries
+    const q = searchQuery.trim().toLowerCase()
+    return orderedEntries.filter((entry) => entry.name.toLowerCase().includes(q))
+  }, [orderedEntries, searchQuery])
 
   const selectedEntries = useMemo(
     () => displayEntries.filter((entry) => selectedEntryIds.includes(entry.id)),
@@ -412,6 +456,7 @@ export default function App() {
     setPreviewPath(path)
     setSelectedFolderId(null)
     setSelectedEntryIds([])
+    setSearchQuery('')
     lastClickedIndexRef.current = -1
     await Promise.all([loadFolders(path), loadPreviewEntries(path)])
   }
@@ -481,12 +526,20 @@ export default function App() {
     }
   }
 
-  async function renameSelected() {
+  function renameSelected() {
     if (selectedEntryIds.length !== 1) return
     const entry = displayEntries.find((e) => e.id === selectedEntryIds[0])
     if (!entry) return
-    const nextName = window.prompt('새 이름을 입력하세요', entry.name)
-    if (!nextName || nextName.trim() === '' || nextName.trim() === entry.name) return
+    setRenameTarget(entry)
+    setRenameModalOpen(true)
+  }
+
+  async function handleRenameConfirm(nextName: string) {
+    setRenameModalOpen(false)
+    const entry = renameTarget
+    setRenameTarget(null)
+    if (!entry) return
+    if (nextName.trim() === '' || nextName.trim() === entry.name) return
     if (actionInProgress) return
     setActionInProgress(true)
 
@@ -501,12 +554,17 @@ export default function App() {
     }
   }
 
-  async function createNewFolder() {
+  function createNewFolder() {
     const targetPath = previewPath || currentPath
     if (!targetPath) return
+    setCreateFolderModalOpen(true)
+  }
 
-    const nextName = window.prompt('새 폴더 이름', '새 폴더')
-    if (!nextName || nextName.trim() === '') return
+  async function handleCreateFolderConfirm(nextName: string) {
+    setCreateFolderModalOpen(false)
+    const targetPath = previewPath || currentPath
+    if (!targetPath) return
+    if (nextName.trim() === '') return
     if (actionInProgress) return
     setActionInProgress(true)
 
@@ -879,6 +937,64 @@ export default function App() {
     }
   }
 
+  const handleContextMenu = (e: React.MouseEvent, entry: ExplorerEntry) => {
+    e.preventDefault()
+    if (!selectedEntryIds.includes(entry.id)) {
+      setSelectedEntryIds([entry.id])
+      lastClickedIndexRef.current = displayEntries.findIndex((item) => item.id === entry.id)
+    }
+    setContextMenu({ x: e.clientX, y: e.clientY })
+  }
+
+  const contextMenuItems: ContextMenuItem[] = useMemo(() => {
+    if (!contextMenu) return []
+    const entry = selectedEntries.length === 1 ? selectedEntries[0] : null
+    return [
+      {
+        label: '열기',
+        shortcut: 'Enter',
+        disabled: !entry,
+        onClick: () => { if (entry) void openEntry(entry) },
+      },
+      {
+        label: '이름 바꾸기',
+        icon: <Pencil size={14} />,
+        shortcut: 'F2',
+        disabled: selectedEntryIds.length !== 1,
+        onClick: () => void renameSelected(),
+      },
+      {
+        label: '복사',
+        icon: <Copy size={14} />,
+        shortcut: 'Ctrl+C',
+        disabled: selectedEntries.length === 0,
+        onClick: () => setClipboard({ mode: 'copy', paths: [...selectedPaths] }),
+      },
+      {
+        label: '잘라내기',
+        icon: <Scissors size={14} />,
+        shortcut: 'Ctrl+X',
+        disabled: selectedEntries.length === 0,
+        onClick: () => setClipboard({ mode: 'cut', paths: [...selectedPaths] }),
+      },
+      {
+        label: '붙여넣기',
+        icon: <ClipboardPaste size={14} />,
+        shortcut: 'Ctrl+V',
+        disabled: !clipboard,
+        onClick: () => void pasteClipboard(),
+      },
+      {
+        label: '삭제',
+        icon: <Trash2 size={14} />,
+        shortcut: 'Del',
+        danger: true,
+        disabled: selectedEntries.length === 0,
+        onClick: () => void deleteSelected(),
+      },
+    ]
+  }, [contextMenu, selectedEntries, selectedEntryIds, selectedPaths, clipboard])
+
   const handleAddBookmark = () => {
     const targetPath = previewPath || currentPath
     if (!targetPath) return
@@ -979,6 +1095,8 @@ export default function App() {
           </button>
         </div>
 
+        <SearchBar value={searchQuery} onChange={setSearchQuery} />
+
         <div className="mode-switch" role="tablist" aria-label="view mode">
           <button className={viewMode === 'list' ? 'active' : ''} onClick={() => setViewMode('list')}>
             <List size={15} /> 목록
@@ -1010,9 +1128,9 @@ export default function App() {
       <main className="explorer-layout">
         <aside className="sidebar">
           <div className="pane-title">드라이브</div>
-          <ul className="drive-list">
+          <ul className="drive-list" role="listbox" aria-label="드라이브 목록">
             {drives.map((drive) => (
-              <li key={drive.id}>
+              <li key={drive.id} role="option" aria-selected={currentPath.startsWith(drive.path)}>
                 <button
                   className={`drive-btn ${currentPath.startsWith(drive.path) ? 'active' : ''}`}
                   onClick={() => void navigateToPath(drive.path)}
@@ -1054,7 +1172,7 @@ export default function App() {
           ) : (
             <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleFolderDragEnd} onDragStart={(event) => setActiveDragId(String(event.active.id))}>
               <SortableContext items={displayFolders.map((folder) => folder.id)} strategy={verticalListSortingStrategy}>
-                <ul className="sidebar-list">
+                <ul className="sidebar-list" role="listbox" aria-label="폴더 목록">
                   {displayFolders.map((folder) => (
                     <SortableFolderRow
                       key={folder.id}
@@ -1111,17 +1229,17 @@ export default function App() {
           {!previewLoading && displayEntries.length === 0 && <p className="state-text">현재 폴더가 비어 있습니다.</p>}
 
           {!previewLoading && displayEntries.length > 0 && viewMode === 'list' && (
-            <div className="table-wrap">
-              <div className="table-head">
-                <span />
-                <span>이름</span>
-                <span>형식</span>
-                <span>크기</span>
-                <span>수정한 날짜</span>
+            <div className="table-wrap" role="grid" aria-label="파일 목록">
+              <div className="table-head" role="row">
+                <span role="columnheader" />
+                <span role="columnheader">이름</span>
+                <span role="columnheader">형식</span>
+                <span role="columnheader">크기</span>
+                <span role="columnheader">수정한 날짜</span>
               </div>
               <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleEntryDragEnd} onDragStart={(event) => setActiveDragId(String(event.active.id))}>
                 <SortableContext items={displayEntries.map((entry) => entry.id)} strategy={verticalListSortingStrategy}>
-                  <ul className="table-body" onClick={(e) => { if (e.target === e.currentTarget) { setSelectedEntryIds([]); lastClickedIndexRef.current = -1 } }}>
+                  <ul className="table-body" role="rowgroup" onClick={(e) => { if (e.target === e.currentTarget) { setSelectedEntryIds([]); lastClickedIndexRef.current = -1 } }}>
                     {displayEntries.map((entry) => (
                       <SortableEntryRow
                         key={entry.id}
@@ -1135,6 +1253,7 @@ export default function App() {
                         onDropEntries={(paths, destinationPath, copyMode) =>
                           void applyPathOperation(paths, destinationPath, copyMode ? 'copy' : 'move')
                         }
+                        onContextMenu={handleContextMenu}
                       />
                     ))}
                   </ul>
@@ -1172,6 +1291,7 @@ export default function App() {
                   }}
                   onClick={(e) => handleEntrySelect(entry, { ctrl: e.ctrlKey || e.metaKey, shift: e.shiftKey })}
                   onDoubleClick={() => void openEntry(entry)}
+                  onContextMenu={(e) => handleContextMenu(e, entry)}
                 >
                   <div className="gallery-thumb">
                     {entry.kind === 'folder' ? (
@@ -1193,7 +1313,7 @@ export default function App() {
         </section>
       </main>
 
-      {(operationStatus || error) && <div className="error-toast">{error ?? operationStatus}</div>}
+      {(operationStatus || error) && <div className="error-toast" role="alert" aria-live="assertive">{error ?? operationStatus}</div>}
 
       <PdfViewer
         open={pdfModalOpen}
@@ -1229,6 +1349,30 @@ export default function App() {
             void loadPreviewEntries(targetPreview)
           }
         }}
+      />
+
+      <FileNameModal
+        open={renameModalOpen}
+        title="이름 바꾸기"
+        defaultName={renameTarget?.name ?? ''}
+        onConfirm={(name) => void handleRenameConfirm(name)}
+        onCancel={() => { setRenameModalOpen(false); setRenameTarget(null) }}
+      />
+
+      <FileNameModal
+        open={createFolderModalOpen}
+        title="새 폴더"
+        defaultName="새 폴더"
+        onConfirm={(name) => void handleCreateFolderConfirm(name)}
+        onCancel={() => setCreateFolderModalOpen(false)}
+      />
+
+      <ContextMenu
+        open={contextMenu !== null}
+        x={contextMenu?.x ?? 0}
+        y={contextMenu?.y ?? 0}
+        items={contextMenuItems}
+        onClose={() => setContextMenu(null)}
       />
     </div>
   )

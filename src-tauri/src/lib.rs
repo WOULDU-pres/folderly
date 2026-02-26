@@ -25,6 +25,7 @@ pub fn run() {
             order::load_manual_order,
             order::save_file_manual_order,
             order::load_file_manual_order,
+            order::rename_order_entry,
             pdf::extract_pdf_pages,
             pdf::extract_and_remove_pdf_pages,
             pdf::merge_pdf_pages,

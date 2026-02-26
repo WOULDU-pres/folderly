@@ -185,6 +185,44 @@ fn now_epoch_ms() -> Result<i64, String> {
         .map_err(|_| "failed converting timestamp into i64 milliseconds".to_string())
 }
 
+#[tauri::command]
+pub fn rename_order_entry(
+    parent_path: String,
+    old_id: String,
+    new_id: String,
+) -> Result<(), String> {
+    let normalized_parent = parent_path.trim();
+    if normalized_parent.is_empty() {
+        return Err("parent_path must not be empty".to_string());
+    }
+
+    let old_trimmed = old_id.trim();
+    let new_trimmed = new_id.trim();
+    if old_trimmed.is_empty() || new_trimmed.is_empty() {
+        return Err("old_id and new_id must not be empty".to_string());
+    }
+
+    let connection = open_db()?;
+
+    // Update in folder_manual_order
+    connection
+        .execute(
+            "UPDATE folder_manual_order SET folder_id = ?1 WHERE parent_path = ?2 AND folder_id = ?3",
+            params![new_trimmed, normalized_parent, old_trimmed],
+        )
+        .map_err(|e| format!("failed updating folder order entry: {e}"))?;
+
+    // Update in file_manual_order
+    connection
+        .execute(
+            "UPDATE file_manual_order SET file_id = ?1 WHERE parent_path = ?2 AND file_id = ?3",
+            params![new_trimmed, normalized_parent, old_trimmed],
+        )
+        .map_err(|e| format!("failed updating file order entry: {e}"))?;
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -316,5 +354,36 @@ mod tests {
 
         assert_eq!(folder_loaded, vec!["folder-a".to_string(), "folder-b".to_string()]);
         assert_eq!(file_loaded, vec!["file-2".to_string(), "file-1".to_string()]);
+    }
+
+    #[test]
+    fn rename_order_entry_updates_id() {
+        let connection = Connection::open_in_memory().expect("in-memory sqlite");
+        ensure_schema(&connection).expect("schema");
+
+        // Insert initial order
+        connection
+            .execute(
+                "INSERT INTO folder_manual_order(parent_path, folder_id, position, updated_at_epoch_ms) VALUES(?1, ?2, ?3, ?4)",
+                params!["C:/parent", "C:/parent/old-name", 0, 1000],
+            )
+            .expect("insert");
+
+        // Rename
+        connection
+            .execute(
+                "UPDATE folder_manual_order SET folder_id = ?1 WHERE parent_path = ?2 AND folder_id = ?3",
+                params!["C:/parent/new-name", "C:/parent", "C:/parent/old-name"],
+            )
+            .expect("rename");
+
+        let loaded = load_manual_order_with_conn(
+            &connection,
+            "folder_manual_order",
+            "folder_id",
+            "C:/parent",
+        )
+        .expect("load");
+        assert_eq!(loaded, vec!["C:/parent/new-name".to_string()]);
     }
 }
