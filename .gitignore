@@ -1,0 +1,22 @@
+node_modules
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+dist
+.vite
+
+src-tauri/target
+src-tauri/gen
+
+.DS_Store
+Thumbs.db
+
+# OMC/OMX state
+.omc/
+.omx/
+**/.omc/
+
+# Release binaries
+release-win/
