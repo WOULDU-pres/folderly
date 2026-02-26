@@ -40,6 +40,25 @@ type ResolvedPdfError = {
 
 type ErrorWithCause = Error & { cause?: unknown }
 
+type PageSourceMap = Record<number, number>
+
+function createPageSourceMap(pageCount: number): PageSourceMap {
+  const map: PageSourceMap = {}
+  for (let page = 1; page <= pageCount; page += 1) {
+    map[page] = page
+  }
+  return map
+}
+
+function normalizeRemovedPages(pages: number[], maxPage: number): number[] {
+  const normalized = new Set<number>()
+  for (const page of pages) {
+    if (!Number.isFinite(page) || page < 1 || page > maxPage) continue
+    normalized.add(Math.trunc(page))
+  }
+  return [...normalized].sort((a, b) => a - b)
+}
+
 function resolvePdfError(errorValue: unknown, fallback: string): ResolvedPdfError {
   let rawMessage: unknown = null
   let rawCause: unknown = null
@@ -164,12 +183,51 @@ export function PdfViewer({ open, file, currentDir, onClose, onExtracted, onRena
   // Internal file state - survives temporary null prop during rename/refresh
   const [viewerFile, setViewerFile] = useState<FileItem | null>(null)
   const skipReloadRef = useRef(false)
+  const pageSourceMapRef = useRef<PageSourceMap>({})
 
   const rightPaneRef = useRef<HTMLDivElement>(null)
   const thumbRefs = useRef<Record<number, HTMLDivElement | null>>({})
   const largePageRefs = useRef<Record<number, HTMLDivElement | null>>({})
   const observerRef = useRef<IntersectionObserver | null>(null)
   const pdfDocRef = useRef<PdfDocumentProxy | null>(null)
+
+  const remapPageDataAfterRemoval = useCallback((removedPages: number[]) => {
+    if (!pageCount || removedPages.length === 0) return
+
+    const normalizedRemoved = normalizeRemovedPages(removedPages, pageCount)
+    if (normalizedRemoved.length === 0) return
+    const removedSet = new Set(normalizedRemoved)
+    const nextPageSourceMap: PageSourceMap = {}
+    const nextThumbs: Record<number, string> = {}
+    const nextLargePreviews: Record<number, string> = {}
+    let removedBefore = 0
+
+    for (let currentPage = 1; currentPage <= pageCount; currentPage += 1) {
+      if (removedSet.has(currentPage)) {
+        removedBefore += 1
+        continue
+      }
+
+      const nextPage = currentPage - removedBefore
+      const sourcePage = pageSourceMapRef.current[currentPage] ?? currentPage
+      nextPageSourceMap[nextPage] = sourcePage
+
+      const thumbValue = thumbs[currentPage]
+      if (thumbValue) {
+        nextThumbs[nextPage] = thumbValue
+      }
+
+      const largeValue = largePreviews[currentPage]
+      if (largeValue) {
+        nextLargePreviews[nextPage] = largeValue
+      }
+    }
+
+    setThumbs(nextThumbs)
+    setLargePreviews(nextLargePreviews)
+
+    pageSourceMapRef.current = nextPageSourceMap
+  }, [pageCount, thumbs, largePreviews])
 
   // Sync viewerFile from prop: only update when prop is non-null
   useEffect(() => {
@@ -267,6 +325,7 @@ export function PdfViewer({ open, file, currentDir, onClose, onExtracted, onRena
         if (cancelled) return
 
         pdfDocRef.current = pdfDocument
+        pageSourceMapRef.current = createPageSourceMap(pdfDocument.numPages)
         setPageCount(pdfDocument.numPages)
 
         for (let pageNumber = 1; pageNumber <= pdfDocument.numPages; pageNumber += 1) {
@@ -304,6 +363,7 @@ export function PdfViewer({ open, file, currentDir, onClose, onExtracted, onRena
       }
       setThumbs({})
       setLargePreviews({})
+      pageSourceMapRef.current = {}
     }
   }, [open, viewerFile?.path, loadVersion, setResolvedError])
 
@@ -311,8 +371,10 @@ export function PdfViewer({ open, file, currentDir, onClose, onExtracted, onRena
   const renderLargePage = useCallback(async (pageNumber: number) => {
     const doc = pdfDocRef.current
     if (!doc) return
+    const sourcePage = pageSourceMapRef.current[pageNumber]
+    if (!sourcePage) return
     try {
-      const page = await doc.getPage(pageNumber)
+      const page = await doc.getPage(sourcePage)
       const viewport = page.getViewport({ scale: 2.0 })
       const canvas = window.document.createElement('canvas')
       const context = canvas.getContext('2d')
@@ -395,12 +457,17 @@ export function PdfViewer({ open, file, currentDir, onClose, onExtracted, onRena
       }
       if (e.key === 'Escape' && pendingExtract) {
         setPendingExtract(null)
+        return
+      }
+      if (e.key === 'Enter' && pendingExtract && !interactionLocked) {
+        e.preventDefault()
+        void doExtract(pendingExtract.fileName, pendingExtract.pages, true)
       }
     }
 
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [open, onClose, fileNameModalOpen, renameModalOpen, pendingExtract, interactionLocked])
+  }, [open, onClose, fileNameModalOpen, renameModalOpen, pendingExtract, interactionLocked, doExtract])
 
   const viewerCardRef = useRef<HTMLDivElement>(null)
 
@@ -496,7 +563,7 @@ export function PdfViewer({ open, file, currentDir, onClose, onExtracted, onRena
     }
   }
 
-  const doExtract = async (fileName: string, sortedPages: number[], destructive: boolean) => {
+  async function doExtract(fileName: string, sortedPages: number[], destructive: boolean) {
     if (!viewerFile) return
 
     setPendingExtract(null)
@@ -517,10 +584,16 @@ export function PdfViewer({ open, file, currentDir, onClose, onExtracted, onRena
           pages: sortedPages,
           outputPath,
         })
-        if (result.remainingPath !== viewerFile.path) {
+        if (result.remainingPath === viewerFile.path) {
+          remapPageDataAfterRemoval(sortedPages)
+          setPageCount(result.remainingCount)
+          setSelectedPages([])
+          setPendingScrollPage(nextPage)
+        } else {
           const nextName = result.remainingPath.split(/[\\/]/).pop() ?? viewerFile.name
           setViewerFile((prev) => (prev ? { ...prev, id: result.remainingPath, path: result.remainingPath, name: nextName } : prev))
           onRenamed(viewerFile.path, result.remainingPath)
+          setLoadVersion((prev) => prev + 1)
         }
         setSuccess(
           appendWarningsMessage(
@@ -528,8 +601,6 @@ export function PdfViewer({ open, file, currentDir, onClose, onExtracted, onRena
             result.warnings,
           ),
         )
-        setPendingScrollPage(nextPage)
-        setLoadVersion((prev) => prev + 1)
         onExtracted()
       } else {
         const result = await invoke<ExtractResult>('extract_pdf_pages', {
@@ -539,6 +610,7 @@ export function PdfViewer({ open, file, currentDir, onClose, onExtracted, onRena
         })
         setErrorCause(null)
         setSuccess(appendWarningsMessage(`${result.pageCount}개 페이지를 추출했습니다: ${fileName}`, result.warnings))
+        onExtracted()
       }
     } catch (e) {
       setResolvedError(e, destructive ? '페이지 추출 및 원본 수정에 실패했습니다.' : '페이지 추출에 실패했습니다.')
