@@ -34,6 +34,7 @@ import {
   FolderDown,
   HardDrive,
   List,
+  Menu,
   Monitor,
   Pencil,
   RefreshCcw,
@@ -718,6 +719,9 @@ export default function App() {
 
   // Phase F1: Search filter
   const [searchQuery, setSearchQuery] = useState('')
+  const [isCompactLayout, setIsCompactLayout] = useState(false)
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
+  const compactLayoutRef = useRef<boolean | null>(null)
 
   // Phase E1: Context menu
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null)
@@ -963,6 +967,9 @@ export default function App() {
   }
 
   async function navigateToPath(path: string) {
+    if (isCompactLayout) {
+      setSidebarCollapsed(true)
+    }
     setCurrentPath(path)
     setPreviewPath(path)
     setSelectedFolderId(null)
@@ -1384,6 +1391,45 @@ export default function App() {
   }
 
   useEffect(() => {
+    const handleResize = () => {
+      const width = window.innerWidth
+      const height = window.innerHeight
+      const isPortrait = height > width
+      const compact = width <= 1120 || (isPortrait && width <= 1600)
+      setIsCompactLayout(compact)
+    }
+
+    handleResize()
+    window.addEventListener('resize', handleResize)
+    return () => window.removeEventListener('resize', handleResize)
+  }, [])
+
+  useEffect(() => {
+    const prevCompact = compactLayoutRef.current
+    if (prevCompact === null) {
+      setSidebarCollapsed(isCompactLayout)
+    } else if (isCompactLayout && !prevCompact) {
+      setSidebarCollapsed(true)
+    } else if (!isCompactLayout && prevCompact) {
+      setSidebarCollapsed(false)
+    }
+    compactLayoutRef.current = isCompactLayout
+  }, [isCompactLayout])
+
+  useEffect(() => {
+    if (!isCompactLayout || sidebarCollapsed) return
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setSidebarCollapsed(true)
+      }
+    }
+
+    window.addEventListener('keydown', handleKeyDown)
+    return () => window.removeEventListener('keydown', handleKeyDown)
+  }, [isCompactLayout, sidebarCollapsed])
+
+  useEffect(() => {
     try {
       const raw = localStorage.getItem(BOOKMARK_STORAGE_KEY)
       if (!raw) return
@@ -1686,6 +1732,9 @@ export default function App() {
       } else {
         void loadPreviewEntries(activeFolder.path)
       }
+      if (isCompactLayout) {
+        setSidebarCollapsed(true)
+      }
       clickTimerRef.current = null
     }, 200)
   }
@@ -1958,6 +2007,19 @@ export default function App() {
       </header>
 
       <section className="command-bar">
+        {isCompactLayout && (
+          <button
+            type="button"
+            className={`win-btn sidebar-toggle-btn ${sidebarCollapsed ? '' : 'active'}`}
+            onClick={() => setSidebarCollapsed((prev) => !prev)}
+            aria-label={sidebarCollapsed ? '사이드바 열기' : '사이드바 닫기'}
+            aria-controls="explorer-sidebar"
+            aria-expanded={!sidebarCollapsed}
+          >
+            <Menu size={16} />
+            {sidebarCollapsed ? '메뉴' : '메뉴 닫기'}
+          </button>
+        )}
         <button className="win-btn" onClick={() => void handleGoParent()}>
           <ArrowUp size={16} /> 상위 폴더
         </button>
@@ -2053,8 +2115,16 @@ export default function App() {
         )}
       </section>
 
-      <main className="explorer-layout">
-        <aside className="sidebar">
+      <main className={`explorer-layout ${isCompactLayout ? 'compact-layout' : ''} ${isCompactLayout && sidebarCollapsed ? 'sidebar-collapsed' : ''}`}>
+        {isCompactLayout && !sidebarCollapsed && (
+          <button
+            type="button"
+            className="sidebar-scrim"
+            onClick={() => setSidebarCollapsed(true)}
+            aria-label="사이드바 닫기"
+          />
+        )}
+        <aside id="explorer-sidebar" className="sidebar" aria-hidden={isCompactLayout && sidebarCollapsed}>
           <div className="pane-title">드라이브</div>
           <ul className="drive-list" role="listbox" aria-label="드라이브 목록">
             {drives.map((drive) => (

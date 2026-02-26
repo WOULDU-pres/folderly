@@ -220,6 +220,10 @@ select {
   cursor: not-allowed;
 }
 
+.sidebar-toggle-btn {
+  min-width: 94px;
+}
+
 .win-field {
   display: inline-flex;
   align-items: center;
@@ -385,6 +389,39 @@ select {
   flex-direction: column;
   min-height: 0;
   min-width: 0;
+}
+
+.explorer-layout.compact-layout {
+  position: relative;
+  grid-template-columns: 1fr;
+}
+
+.explorer-layout.compact-layout .content-pane {
+  grid-column: 1 / -1;
+}
+
+.explorer-layout.compact-layout .sidebar {
+  position: absolute;
+  inset: 0 auto 0 0;
+  height: 100%;
+  width: min(320px, calc(100vw - 28px));
+  z-index: 30;
+  box-shadow: var(--shadow);
+  transition: transform 180ms ease;
+}
+
+.explorer-layout.compact-layout.sidebar-collapsed .sidebar {
+  transform: translateX(calc(-100% - 10px));
+  pointer-events: none;
+}
+
+.sidebar-scrim {
+  position: absolute;
+  inset: 0;
+  z-index: 20;
+  border: 0;
+  background: rgba(12, 18, 28, 0.26);
+  cursor: pointer;
 }
 
 .pane-title {
@@ -1395,7 +1432,7 @@ select:focus-visible {
     grid-template-columns: 1fr;
   }
 
-  .sidebar {
+  .explorer-layout:not(.compact-layout) .sidebar {
     min-height: min(42vh, 360px);
   }
 
@@ -1491,5 +1528,11 @@ select:focus-visible {
   .undo-toast-btn {
     width: 100%;
     justify-content: center;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .explorer-layout.compact-layout .sidebar {
+    transition: none;
   }
 }

@@ -402,23 +402,27 @@ export function PdfViewer({ open, file, currentDir, onClose, onExtracted, onRena
     return () => window.removeEventListener('keydown', handleKeyDown)
   }, [open, onClose, fileNameModalOpen, renameModalOpen, pendingExtract, interactionLocked])
 
-  // Ctrl+Scroll to zoom
-  useEffect(() => {
-    const pane = rightPaneRef.current
-    if (!open || !pane) return
+  const viewerCardRef = useRef<HTMLDivElement>(null)
 
-    const handleWheel = (e: WheelEvent) => {
-      if (!e.ctrlKey) return
-      e.preventDefault()
-      setZoom((prev) => {
-        const delta = e.deltaY > 0 ? -50 : 50
-        return Math.min(1400, Math.max(200, prev + delta))
-      })
+  // Ctrl/Cmd + Scroll to zoom (capture on modal card to avoid being blocked by inner scroll targets)
+  useEffect(() => {
+    const container = viewerCardRef.current
+    if (!open || !container) return
+
+    const handleWheel = (event: WheelEvent) => {
+      const shouldZoom = event.ctrlKey || event.metaKey
+      if (!shouldZoom) return
+      if (!container.contains(event.target as Node | null)) return
+
+      event.preventDefault()
+      if (interactionLocked) return
+      const delta = event.deltaY > 0 ? -50 : 50
+      setZoom((prev) => Math.min(1400, Math.max(200, prev + delta)))
     }
 
-    pane.addEventListener('wheel', handleWheel, { passive: false })
-    return () => pane.removeEventListener('wheel', handleWheel)
-  }, [open])
+    container.addEventListener('wheel', handleWheel, { passive: false, capture: true })
+    return () => container.removeEventListener('wheel', handleWheel, { capture: true })
+  }, [open, interactionLocked])
 
   const togglePage = (page: number) => {
     if (interactionLocked) return
@@ -573,7 +577,7 @@ export function PdfViewer({ open, file, currentDir, onClose, onExtracted, onRena
 
   return (
     <div className="modal-overlay" role="dialog" aria-modal="true" aria-label="PDF viewer">
-      <div className="pdf-viewer-card">
+      <div className="pdf-viewer-card" ref={viewerCardRef}>
         {/* Header */}
         <div className="pdf-viewer-header">
           <div>
