@@ -16,7 +16,7 @@
         "title": "Windows PDF Directory Explorer",
         "width": 1480,
         "height": 860,
-        "minWidth": 1160,
+        "minWidth": 900,
         "minHeight": 640,
         "resizable": true
       }

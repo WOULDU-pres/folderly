@@ -19,9 +19,12 @@ import {
 } from '@dnd-kit/sortable'
 import { CSS } from '@dnd-kit/utilities'
 import {
+  AlertCircle,
   ArrowUp,
   BookmarkPlus,
+  CheckCircle2,
   Copy,
+  Info,
   File,
   FileText,
   Folder,
@@ -36,6 +39,7 @@ import {
   RefreshCcw,
   Scissors,
   Trash2,
+  Undo2,
   ClipboardPaste,
   X,
 } from 'lucide-react'
@@ -95,17 +99,76 @@ function writeDragPayload(event: ReactDragEvent, paths: string[]) {
   event.dataTransfer.effectAllowed = 'copyMove'
 }
 
-function readDragPayload(event: ReactDragEvent): string[] {
-  const payload = event.dataTransfer.getData(ENTRY_DRAG_MIME) || event.dataTransfer.getData('text/plain')
-  if (!payload) return []
+function normalizeDragPaths(paths: string[]): string[] {
+  const deduped = new Set<string>()
+  for (const value of paths) {
+    const trimmed = value.trim()
+    if (!trimmed) continue
+    deduped.add(trimmed)
+  }
+  return Array.from(deduped)
+}
+
+function decodeFileUriPath(value: string): string {
+  if (!value.toLowerCase().startsWith('file://')) {
+    return value
+  }
 
   try {
-    const parsed = JSON.parse(payload)
+    const uri = new URL(value)
+    const decodedPath = decodeURIComponent(uri.pathname)
+    const normalizedLeadingSlash = decodedPath.replace(/^\/([A-Za-z]:[\\/])/, '$1')
+    return normalizedLeadingSlash.replace(/\//g, '\\')
+  } catch {
+    return value
+  }
+}
+
+function parseDragPayload(payload: string): string[] {
+  const trimmedPayload = payload.trim()
+  if (!trimmedPayload) return []
+
+  try {
+    const parsed = JSON.parse(trimmedPayload)
     if (Array.isArray(parsed)) {
-      return parsed.filter((value): value is string => typeof value === 'string' && value.length > 0)
+      return normalizeDragPaths(parsed.filter((value): value is string => typeof value === 'string'))
+    }
+    if (typeof parsed === 'string') {
+      return normalizeDragPaths([parsed])
     }
   } catch {
-    return []
+    // fallback below
+  }
+
+  const lines = trimmedPayload
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0 && !line.startsWith('#'))
+    .map(decodeFileUriPath)
+
+  return normalizeDragPaths(lines)
+}
+
+function readDragPayload(event: ReactDragEvent): string[] {
+  const mimePayload = event.dataTransfer.getData(ENTRY_DRAG_MIME)
+  if (mimePayload) {
+    const parsed = parseDragPayload(mimePayload)
+    if (parsed.length > 0) {
+      return parsed
+    }
+  }
+
+  const uriListPayload = event.dataTransfer.getData('text/uri-list')
+  if (uriListPayload) {
+    const parsed = parseDragPayload(uriListPayload)
+    if (parsed.length > 0) {
+      return parsed
+    }
+  }
+
+  const plainTextPayload = event.dataTransfer.getData('text/plain')
+  if (plainTextPayload) {
+    return parseDragPayload(plainTextPayload)
   }
 
   return []
@@ -113,7 +176,7 @@ function readDragPayload(event: ReactDragEvent): string[] {
 
 function hasExplorerDragPayload(event: ReactDragEvent): boolean {
   const types = Array.from(event.dataTransfer.types)
-  return types.includes(ENTRY_DRAG_MIME) || types.includes('text/plain')
+  return types.includes(ENTRY_DRAG_MIME) || types.includes('text/plain') || types.includes('text/uri-list')
 }
 
 function updateDropEffect(event: ReactDragEvent) {
@@ -251,8 +314,15 @@ function SortableEntryRow({
       role="row"
       aria-selected={selected}
       tabIndex={0}
-      draggable={!manualMode}
-      onDragStart={(event) => writeDragPayload(event, selected && dragPaths.length > 0 ? dragPaths : [entry.path])}
+      draggable
+      onDragStart={(event) => {
+        const target = event.target as HTMLElement | null
+        if (manualMode && target?.closest('.file-drag-handle')) {
+          event.preventDefault()
+          return
+        }
+        writeDragPayload(event, selected && dragPaths.length > 0 ? dragPaths : [entry.path])
+      }}
       onDragOver={(event) => {
         if (entry.kind === 'folder') {
           event.preventDefault()
@@ -402,13 +472,16 @@ function SortableGalleryCard({
       role="button"
       aria-selected={selected}
       tabIndex={0}
-      draggable={!manualMode}
+      draggable
       onDragStart={(event) => {
-        if (manualMode) return
+        const target = event.target as HTMLElement | null
+        if (manualMode && target?.closest('.gallery-drag-handle')) {
+          event.preventDefault()
+          return
+        }
         writeDragPayload(event, selected && dragPaths.length > 0 ? dragPaths : [entry.path])
       }}
       onDragOver={(event) => {
-        if (manualMode) return
         if (entry.kind === 'folder') {
           event.preventDefault()
           updateDropEffect(event)
@@ -416,14 +489,14 @@ function SortableGalleryCard({
         }
       }}
       onDragEnter={(event) => {
-        if (manualMode || entry.kind !== 'folder' || !hasExplorerDragPayload(event)) return
+        if (entry.kind !== 'folder' || !hasExplorerDragPayload(event)) return
         event.preventDefault()
         setDropTargetActive(true)
       }}
       onDragLeave={() => setDropTargetActive(false)}
       onDrop={(event) => {
         setDropTargetActive(false)
-        if (manualMode || entry.kind !== 'folder') return
+        if (entry.kind !== 'folder') return
         if (!hasExplorerDragPayload(event)) return
         event.preventDefault()
         event.stopPropagation()
@@ -775,7 +848,7 @@ export default function App() {
     if (undoToastTimerRef.current) {
       window.clearTimeout(undoToastTimerRef.current)
     }
-    setUndoToastMessage(`${entry.label} (Ctrl+Z)`)
+    setUndoToastMessage(entry.label)
     undoToastTimerRef.current = window.setTimeout(() => {
       setUndoToastMessage(null)
       undoToastTimerRef.current = null
@@ -790,8 +863,10 @@ export default function App() {
   const toastState = useMemo(() => {
     if (error) {
       return {
+        title: '작업 실패',
         message: error,
-        className: 'error-toast',
+        tone: 'error' as const,
+        inProgress: false,
         role: 'alert' as const,
         ariaLive: 'assertive' as const,
       }
@@ -800,9 +875,12 @@ export default function App() {
       return null
     }
     const isSuccess = operationStatus.includes('완료')
+    const isInProgress = operationStatus.includes('중')
     return {
+      title: isSuccess ? '작업 완료' : isInProgress ? '작업 진행 중' : '작업 상태',
       message: operationStatus,
-      className: isSuccess ? 'success-toast' : 'info-toast',
+      tone: isSuccess ? 'success' : 'info',
+      inProgress: isInProgress,
       role: 'status' as const,
       ariaLive: 'polite' as const,
     }
@@ -990,6 +1068,19 @@ export default function App() {
     await invoke('clear_shared_clipboard')
   }
 
+  async function getLatestSharedClipboard(): Promise<ClipboardState> {
+    try {
+      const shared = await invoke<ClipboardState>('get_shared_clipboard')
+      const normalized = normalizeClipboardState(shared)
+      if (normalized) {
+        setClipboard(normalized)
+      }
+      return normalized
+    } catch {
+      return null
+    }
+  }
+
   function syncClipboard(nextClipboard: ClipboardState) {
     setClipboard(nextClipboard)
     if (!nextClipboard) {
@@ -1013,7 +1104,9 @@ export default function App() {
   }
 
   async function pasteClipboard() {
-    if (!clipboard || operationInProgress) return
+    if (operationInProgress) return
+    const effectiveClipboard = clipboard ?? await getLatestSharedClipboard()
+    if (!effectiveClipboard) return
 
     const targetResolution = resolvePasteTarget({
       selectedFolderTargets: selectedEntries
@@ -1028,11 +1121,11 @@ export default function App() {
     }
 
     const completed = await applyPathOperation(
-      clipboard.paths,
+      effectiveClipboard.paths,
       targetResolution.targetPath,
-      clipboard.mode === 'copy' ? 'copy' : 'move',
+      effectiveClipboard.mode === 'copy' ? 'copy' : 'move',
     )
-    if (completed && clipboard.mode === 'cut') {
+    if (completed && effectiveClipboard.mode === 'cut') {
       syncClipboard(null)
     }
   }
@@ -2044,7 +2137,23 @@ export default function App() {
           )}
         </aside>
 
-        <section className="content-pane">
+        <section
+          className="content-pane"
+          onDragOver={(event) => {
+            if (!hasExplorerDragPayload(event)) return
+            event.preventDefault()
+            updateDropEffect(event)
+          }}
+          onDrop={(event) => {
+            if (!hasExplorerDragPayload(event)) return
+            event.preventDefault()
+            const destinationPath = previewPath || currentPath
+            if (!destinationPath) return
+            const paths = readDragPayload(event)
+            if (!paths.length) return
+            void applyPathOperation(paths, destinationPath, event.ctrlKey || event.metaKey ? 'copy' : 'move')
+          }}
+        >
           <div className="pane-head">
             <p className="pane-summary">
               {displayEntries.length}개 항목
@@ -2212,18 +2321,43 @@ export default function App() {
         </section>
       </main>
 
-      {toastState && (
-        <div className={`toast ${toastState.className}`} role={toastState.role} aria-live={toastState.ariaLive}>
-          {toastState.message}
-        </div>
-      )}
+      {(toastState || undoToastMessage) && (
+        <div className="toast-stack">
+          {toastState && (
+            <div className={`toast ${toastState.tone}-toast`} role={toastState.role} aria-live={toastState.ariaLive} aria-atomic="true">
+              <span className="toast-icon" aria-hidden="true">
+                {toastState.tone === 'error' ? (
+                  <AlertCircle size={16} />
+                ) : toastState.tone === 'success' ? (
+                  <CheckCircle2 size={16} />
+                ) : toastState.inProgress ? (
+                  <RefreshCcw size={16} className="toast-spin" />
+                ) : (
+                  <Info size={16} />
+                )}
+              </span>
+              <div className="toast-content">
+                <strong className="toast-title">{toastState.title}</strong>
+                <span className="toast-message">{toastState.message}</span>
+              </div>
+            </div>
+          )}
 
-      {undoToastMessage && (
-        <div className="toast info-toast undo-toast" role="status" aria-live="polite">
-          <span>{undoToastMessage}</span>
-          <button className="undo-toast-btn" onClick={() => void undoLastAction()}>
-            실행 취소
-          </button>
+          {undoToastMessage && (
+            <div className="toast info-toast undo-toast" role="status" aria-live="polite" aria-atomic="true">
+              <span className="toast-icon" aria-hidden="true">
+                <Undo2 size={16} />
+              </span>
+              <div className="toast-content">
+                <strong className="toast-title">실행 취소 가능</strong>
+                <span className="toast-message">{undoToastMessage}</span>
+                <span className="toast-shortcut">단축키: Ctrl+Z</span>
+              </div>
+              <button type="button" className="undo-toast-btn" onClick={() => void undoLastAction()}>
+                실행 취소
+              </button>
+            </div>
+          )}
         </div>
       )}
 

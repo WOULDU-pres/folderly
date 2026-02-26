@@ -33,8 +33,9 @@ export function SearchBar({ value, onChange, placeholder = '파일 검색 (Ctrl+
         border: '1px solid var(--border, #e1e4ea)',
         background: 'var(--bg-pane, #ffffff)',
         padding: '0 8px',
-        minWidth: 180,
+        minWidth: 132,
         maxWidth: 260,
+        flex: '1 1 180px',
       }}
     >
       <Search size={14} style={{ color: 'var(--muted, #5d636f)', flexShrink: 0 }} />

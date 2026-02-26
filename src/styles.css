@@ -181,6 +181,10 @@ select {
   overflow-x: auto;
 }
 
+.command-bar > * {
+  min-width: 0;
+}
+
 .win-btn {
   height: 36px;
   padding: 0 12px;
@@ -368,8 +372,10 @@ select {
 
 .explorer-layout {
   display: grid;
-  grid-template-columns: 320px minmax(0, 1fr);
+  grid-template-columns: clamp(220px, 24vw, 320px) minmax(0, 1fr);
   min-height: 0;
+  min-width: 0;
+  overflow: hidden;
 }
 
 .sidebar {
@@ -378,6 +384,7 @@ select {
   display: flex;
   flex-direction: column;
   min-height: 0;
+  min-width: 0;
 }
 
 .pane-title {
@@ -471,6 +478,7 @@ select {
 
 .content-pane {
   min-height: 0;
+  min-width: 0;
   background: var(--bg-pane);
   display: grid;
   grid-template-rows: auto 1fr;
@@ -500,7 +508,7 @@ select {
   margin: 0;
   color: var(--muted);
   min-width: 0;
-  flex: 1 1 320px;
+  flex: 1 1 220px;
 }
 
 .pane-hint {
@@ -508,6 +516,7 @@ select {
   color: var(--muted);
   font-size: 12px;
   white-space: nowrap;
+  min-width: 0;
 }
 
 .pane-actions {
@@ -516,6 +525,8 @@ select {
   gap: 8px;
   flex-wrap: wrap;
   justify-content: flex-end;
+  min-width: 0;
+  max-width: 100%;
 }
 
 .state-text {
@@ -551,7 +562,7 @@ select {
 .table-head,
 .table-row {
   display: grid;
-  grid-template-columns: 34px minmax(240px, 2fr) 100px 110px minmax(180px, 1fr);
+  grid-template-columns: 34px minmax(190px, 2fr) 92px 104px minmax(150px, 1fr);
   align-items: center;
   gap: 8px;
   padding: 0 14px;
@@ -718,16 +729,65 @@ select {
   opacity: 0.35;
 }
 
-.toast {
+.toast-stack {
   position: fixed;
   right: 16px;
   bottom: 16px;
-  padding: 10px 12px;
-  border-radius: 8px;
+  z-index: 60;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  align-items: flex-end;
+  width: min(440px, calc(100vw - 24px));
+  pointer-events: none;
+}
+
+.toast {
+  width: 100%;
+  min-width: min(300px, 100%);
+  border-radius: 10px;
   border: 1px solid transparent;
   box-shadow: var(--shadow);
-  max-width: min(420px, calc(100vw - 32px));
-  z-index: 60;
+  padding: 10px 12px;
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  pointer-events: auto;
+}
+
+.toast-icon {
+  width: 24px;
+  height: 24px;
+  border-radius: 999px;
+  display: inline-grid;
+  place-items: center;
+  flex-shrink: 0;
+}
+
+.toast-content {
+  min-width: 0;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.toast-title {
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.35;
+}
+
+.toast-message {
+  font-size: 13px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.toast-shortcut {
+  font-size: 11px;
+  line-height: 1.3;
+  color: var(--muted);
 }
 
 .error-toast {
@@ -736,10 +796,18 @@ select {
   color: var(--danger);
 }
 
+.error-toast .toast-icon {
+  background: rgba(180, 35, 47, 0.12);
+}
+
 .success-toast {
   border-color: var(--success-border);
   background: var(--success-bg);
   color: var(--success);
+}
+
+.success-toast .toast-icon {
+  background: rgba(15, 126, 79, 0.14);
 }
 
 .info-toast {
@@ -748,24 +816,79 @@ select {
   color: var(--accent);
 }
 
+.info-toast .toast-icon {
+  background: rgba(11, 87, 208, 0.14);
+}
+
 .undo-toast {
-  display: flex;
-  align-items: center;
-  gap: 10px;
+  align-items: flex-start;
 }
 
 .undo-toast-btn {
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: 7px;
   background: var(--bg-card);
   color: var(--text);
-  padding: 4px 10px;
+  padding: 5px 10px;
   cursor: pointer;
   font: inherit;
+  white-space: nowrap;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  align-self: center;
 }
 
 .undo-toast-btn:hover {
   border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .toast {
+    animation: toast-slide-in 180ms ease-out;
+  }
+
+  .toast-spin {
+    animation: toast-icon-spin 900ms linear infinite;
+  }
+
+  .undo-toast-btn {
+    transition: border-color 160ms ease, background-color 160ms ease, transform 160ms ease;
+  }
+
+  .undo-toast-btn:active {
+    transform: translateY(1px);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .toast,
+  .undo-toast-btn {
+    animation: none;
+    transition: none;
+  }
+
+  .toast-spin {
+    animation: none;
+  }
+}
+
+@keyframes toast-slide-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes toast-icon-spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 .modal-overlay {
@@ -1231,13 +1354,13 @@ select:focus-visible {
   }
 }
 
-@media (max-width: 1360px) {
+@media (max-width: 1360px), (orientation: portrait) {
   .explorer-app {
     grid-template-rows: 40px auto auto 1fr;
   }
 
   .explorer-layout {
-    grid-template-columns: 280px minmax(0, 1fr);
+    grid-template-columns: clamp(200px, 26vw, 250px) minmax(0, 1fr);
   }
 
   .mode-switch {
@@ -1267,7 +1390,7 @@ select:focus-visible {
   }
 }
 
-@media (max-width: 980px) {
+@media (max-width: 1120px), (orientation: portrait) and (max-width: 1600px) {
   .explorer-layout {
     grid-template-columns: 1fr;
   }
@@ -1289,6 +1412,10 @@ select:focus-visible {
     justify-content: flex-start;
   }
 
+  .pane-hint {
+    white-space: normal;
+  }
+
   .sort-chip-group {
     width: fit-content;
     max-width: 100%;
@@ -1301,9 +1428,16 @@ select:focus-visible {
 
   .table-head,
   .table-row {
-    grid-template-columns: 30px minmax(170px, 2fr) 84px 92px minmax(130px, 1fr);
+    grid-template-columns: 30px minmax(170px, 2fr) 80px 90px minmax(120px, 1fr);
     padding: 0 10px;
     gap: 6px;
+  }
+}
+
+@media (max-width: 980px) {
+  .table-head,
+  .table-row {
+    grid-template-columns: 28px minmax(150px, 2fr) 76px 86px minmax(112px, 1fr);
   }
 }
 
@@ -1335,5 +1469,27 @@ select:focus-visible {
   .table-head,
   .table-row {
     grid-template-columns: 26px minmax(150px, 2fr) 76px 84px minmax(118px, 1fr);
+  }
+
+  .toast-stack {
+    right: 10px;
+    left: 10px;
+    bottom: 10px;
+    width: auto;
+    max-width: none;
+    align-items: stretch;
+  }
+
+  .toast {
+    min-width: 0;
+  }
+
+  .undo-toast {
+    flex-wrap: wrap;
+  }
+
+  .undo-toast-btn {
+    width: 100%;
+    justify-content: center;
   }
 }
