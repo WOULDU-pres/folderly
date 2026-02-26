@@ -14,6 +14,22 @@ const fileSample: FileItem[] = [
   { id: 'f3', name: 'beta.jpg', path: 'f3', ext: 'jpg', size: 3, modifiedAt: 20, isHidden: true },
 ]
 
+const numericFolderSample: FolderItem[] = [
+  { id: 'n10', name: '10-folder', path: 'n10', modifiedAt: 1, isHidden: false },
+  { id: 'n2', name: '2-folder', path: 'n2', modifiedAt: 1, isHidden: false },
+  { id: 'n1', name: '1-folder', path: 'n1', modifiedAt: 1, isHidden: false },
+  { id: 'n11', name: '11-folder', path: 'n11', modifiedAt: 1, isHidden: false },
+  { id: 'n0', name: '0-folder', path: 'n0', modifiedAt: 1, isHidden: false },
+]
+
+const numericFileSample: FileItem[] = [
+  { id: 'nf10', name: '10.pdf', path: 'nf10', ext: 'pdf', size: 10, modifiedAt: 10, isHidden: false },
+  { id: 'nf2', name: '2.pdf', path: 'nf2', ext: 'pdf', size: 20, modifiedAt: 10, isHidden: false },
+  { id: 'nf1', name: '1.pdf', path: 'nf1', ext: 'pdf', size: 30, modifiedAt: 10, isHidden: false },
+  { id: 'nf11', name: '11.pdf', path: 'nf11', ext: 'pdf', size: 40, modifiedAt: 10, isHidden: false },
+  { id: 'nf0', name: '0.pdf', path: 'nf0', ext: 'pdf', size: 50, modifiedAt: 10, isHidden: false },
+]
+
 describe('sortFolders', () => {
   it('sorts by name', () => {
     const sorted = sortFolders(sample, 'name')
@@ -28,6 +44,17 @@ describe('sortFolders', () => {
   it('falls back to name order for size mode', () => {
     const sorted = sortFolders(sample, 'size')
     expect(sorted.map((folder) => folder.id)).toEqual(['b', 'a', 'c'])
+  })
+
+  it('sorts numeric-leading folder names in natural order', () => {
+    const sorted = sortFolders(numericFolderSample, 'name')
+    expect(sorted.map((folder) => folder.name)).toEqual([
+      '0-folder',
+      '1-folder',
+      '2-folder',
+      '10-folder',
+      '11-folder',
+    ])
   })
 })
 
@@ -54,5 +81,10 @@ describe('mergeManualOrder', () => {
 
     const manual = mergeManualOrder(byName, ['f1', 'f2'])
     expect(manual.map((file) => file.id)).toEqual(['f1', 'f2', 'f3'])
+  })
+
+  it('sorts numeric-leading file names in natural order', () => {
+    const sorted = sortFiles(numericFileSample, 'name')
+    expect(sorted.map((file) => file.name)).toEqual(['0.pdf', '1.pdf', '2.pdf', '10.pdf', '11.pdf'])
   })
 })

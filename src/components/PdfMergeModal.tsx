@@ -32,25 +32,113 @@ type PdfMergeModalProps = {
   currentDir: string
   onClose: () => void
   onMerged: () => void
+  onBusyChange?: (message: string | null) => void
 }
 
-export function PdfMergeModal({ open, pdfFiles, currentDir, onClose, onMerged }: PdfMergeModalProps) {
+type ResolvedPdfError = {
+  message: string
+  cause: string | null
+}
+
+type ErrorWithCause = Error & { cause?: unknown }
+
+function resolvePdfError(errorValue: unknown, fallback: string): ResolvedPdfError {
+  let rawMessage: unknown = null
+  let rawCause: unknown = null
+
+  if (errorValue instanceof Error) {
+    rawMessage = errorValue.message
+    rawCause = (errorValue as ErrorWithCause).cause
+  } else if (typeof errorValue === 'string') {
+    rawMessage = errorValue
+  } else if (typeof errorValue === 'object' && errorValue !== null) {
+    const errorObject = errorValue as {
+      message?: unknown
+      error?: unknown
+      cause?: unknown
+      details?: unknown
+    }
+    rawMessage = errorObject.message ?? errorObject.error ?? null
+    rawCause = errorObject.cause ?? errorObject.details ?? null
+  }
+
+  let message = typeof rawMessage === 'string' ? rawMessage.trim() : ''
+  let cause = typeof rawCause === 'string' ? rawCause.trim() : null
+
+  if (!message) {
+    message = fallback
+  }
+
+  message = message.replace(/^error while invoking [^:]+:\s*/i, '').trim()
+
+  if (!cause) {
+    const causedByMatch = message.match(/(?:caused by|원인)\s*:?\s*(.+)$/i)
+    if (causedByMatch?.[1]) {
+      cause = causedByMatch[1].trim()
+      message = message.slice(0, causedByMatch.index).trim() || fallback
+    }
+  }
+
+  if (!cause) {
+    const separatorIndex = message.indexOf(': ')
+    const hasWindowsPathPrefix = /^[A-Za-z]:[\\/]/.test(message)
+    if (!hasWindowsPathPrefix && separatorIndex > 0 && separatorIndex < message.length - 2) {
+      const summary = message.slice(0, separatorIndex).trim()
+      const detail = message.slice(separatorIndex + 2).trim()
+      if (summary && detail) {
+        message = summary
+        cause = detail
+      }
+    }
+  }
+
+  if (cause) {
+    cause = cause.replace(/^error while invoking [^:]+:\s*/i, '').trim()
+    if (!cause || cause === message) {
+      cause = null
+    }
+  }
+
+  return { message, cause }
+}
+
+function appendWarningsMessage(baseMessage: string, warnings: string[]): string {
+  if (!warnings.length) return baseMessage
+  return `${baseMessage} (참고: ${warnings.join(' / ')})`
+}
+
+export function PdfMergeModal({ open, pdfFiles, currentDir, onClose, onMerged, onBusyChange }: PdfMergeModalProps) {
   const [selectedPaths, setSelectedPaths] = useState<string[]>([])
   const [previewByPath, setPreviewByPath] = useState<Record<string, PreviewEntry>>({})
   const [merging, setMerging] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [errorCause, setErrorCause] = useState<string | null>(null)
   const [success, setSuccess] = useState<string | null>(null)
   const [fileNameModalOpen, setFileNameModalOpen] = useState(false)
   const loadingPreviewPathsRef = useRef(new Set<string>())
   const selectedPathSetRef = useRef(new Set<string>())
   const previewByPathRef = useRef<Record<string, PreviewEntry>>({})
   const fileByPath = useMemo(() => new Map(pdfFiles.map((file) => [file.path, file])), [pdfFiles])
+  const setResolvedError = useCallback((errorValue: unknown, fallback: string) => {
+    const resolved = resolvePdfError(errorValue, fallback)
+    setError(resolved.message)
+    setErrorCause(resolved.cause)
+  }, [])
+
+  const busyOverlayContent = useMemo(() => {
+    if (!merging) return null
+    return {
+      title: 'PDF 병합 작업을 저장하는 중...',
+      description: '선택한 파일을 병합하고 결과 파일을 생성하고 있습니다.',
+    }
+  }, [merging])
 
   useEffect(() => {
     if (open) {
       setSelectedPaths([])
       setPreviewByPath({})
       setError(null)
+      setErrorCause(null)
       setSuccess(null)
       setMerging(false)
       setFileNameModalOpen(false)
@@ -68,14 +156,27 @@ export function PdfMergeModal({ open, pdfFiles, currentDir, onClose, onMerged }:
     if (!open) return
 
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape' && !fileNameModalOpen) {
+      if (e.key === 'Escape' && !fileNameModalOpen && !merging) {
         onClose()
       }
     }
 
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [open, onClose, fileNameModalOpen])
+  }, [open, onClose, fileNameModalOpen, merging])
+
+  useEffect(() => {
+    if (!onBusyChange) return
+    if (!open || !busyOverlayContent) {
+      onBusyChange(null)
+      return
+    }
+    onBusyChange(busyOverlayContent.title)
+  }, [open, busyOverlayContent, onBusyChange])
+
+  useEffect(() => {
+    return () => onBusyChange?.(null)
+  }, [onBusyChange])
 
   useEffect(() => {
     if (!open) {
@@ -144,13 +245,14 @@ export function PdfMergeModal({ open, pdfFiles, currentDir, onClose, onMerged }:
   }, [open, selectedPaths])
 
   const toggleFile = useCallback((path: string) => {
+    if (merging) return
     setSelectedPaths((prev) => {
       if (prev.includes(path)) {
         return prev.filter((p) => p !== path)
       }
       return [...prev, path]
     })
-  }, [])
+  }, [merging])
 
   const selectionIndex = useCallback(
     (path: string) => {
@@ -169,6 +271,7 @@ export function PdfMergeModal({ open, pdfFiles, currentDir, onClose, onMerged }:
     setFileNameModalOpen(false)
     setMerging(true)
     setError(null)
+    setErrorCause(null)
     setSuccess(null)
 
     try {
@@ -176,10 +279,10 @@ export function PdfMergeModal({ open, pdfFiles, currentDir, onClose, onMerged }:
       const outputPath = toCustomNamePdfPath(currentDir, fileName)
 
       const result = await invoke<MergeResult>('merge_pdf_pages', { sources, outputPath })
-      setSuccess(`${result.totalPages}개 페이지로 병합 완료: ${fileName}`)
+      setSuccess(appendWarningsMessage(`${result.totalPages}개 페이지로 병합 완료: ${fileName}`, result.warnings))
       onMerged()
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e))
+      setResolvedError(e, 'PDF 병합에 실패했습니다.')
     } finally {
       setMerging(false)
     }
@@ -198,7 +301,7 @@ export function PdfMergeModal({ open, pdfFiles, currentDir, onClose, onMerged }:
             <h2>PDF 병합</h2>
             <p>병합할 PDF 파일을 클릭 순서대로 선택하세요 ({selectedPaths.length}개 선택)</p>
           </div>
-          <button className="ghost" onClick={onClose}>
+          <button className="ghost" onClick={onClose} disabled={merging}>
             닫기
           </button>
         </header>
@@ -357,11 +460,14 @@ export function PdfMergeModal({ open, pdfFiles, currentDir, onClose, onMerged }:
               <ProgressBar current={0} total={1} label="병합 중..." />
             </div>
           ) : (
-            <span style={{ color: error ? 'var(--danger)' : success ? 'var(--success, #0f7e4f)' : 'var(--muted)', fontSize: 13, flex: 1 }}>
-              {error ?? success ?? ''}
-            </span>
+            <div className="pdf-feedback">
+              <span className={`pdf-feedback-main ${error ? 'error' : success ? 'success' : 'muted'}`}>
+                {error ?? success ?? ''}
+              </span>
+              {errorCause && <span className="pdf-feedback-cause">원인: {errorCause}</span>}
+            </div>
           )}
-          <button className="ghost" onClick={onClose}>
+          <button className="ghost" onClick={onClose} disabled={merging}>
             취소
           </button>
           <button
@@ -372,6 +478,16 @@ export function PdfMergeModal({ open, pdfFiles, currentDir, onClose, onMerged }:
             {merging ? '병합 중...' : `병합 (${selectedPaths.length}개 파일)`}
           </button>
         </footer>
+
+        {busyOverlayContent && (
+          <div className="pdf-global-loading-overlay" role="status" aria-live="polite" aria-busy="true">
+            <div className="pdf-global-loading-content">
+              <span className="pdf-global-loading-spinner" />
+              <strong>{busyOverlayContent.title}</strong>
+              <span>{busyOverlayContent.description}</span>
+            </div>
+          </div>
+        )}
       </div>
 
       <FileNameModal

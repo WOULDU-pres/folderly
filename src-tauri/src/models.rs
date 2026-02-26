@@ -62,3 +62,10 @@ pub struct MergeResult {
     pub total_pages: usize,
     pub warnings: Vec<String>,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SharedClipboardState {
+    pub mode: String,
+    pub paths: Vec<String>,
+}

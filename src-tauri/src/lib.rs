@@ -1,3 +1,4 @@
+mod clipboard;
 mod fs;
 mod models;
 mod order;
@@ -6,8 +7,13 @@ mod pdf;
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .manage(clipboard::SharedClipboardState::default())
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
+            clipboard::get_shared_clipboard,
+            clipboard::set_shared_clipboard,
+            clipboard::clear_shared_clipboard,
+            clipboard::open_second_window,
             fs::get_default_root_path,
             fs::list_drives,
             fs::get_quick_access_paths,

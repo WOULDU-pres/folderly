@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { invoke } from '@tauri-apps/api/core'
-import { ExtractAndRemoveResult, FileItem } from '../types'
+import { ExtractAndRemoveResult, ExtractResult, FileItem } from '../types'
 import { getFileDirectory, getFileNameWithoutExt, toCustomNamePdfPath } from '../utils/path'
 import { FileNameModal } from './FileNameModal'
 import { ProgressBar } from './ProgressBar'
@@ -30,18 +30,132 @@ type PdfViewerProps = {
   onClose: () => void
   onExtracted: () => void
   onRenamed: (oldPath: string, newPath: string) => void
+  onBusyChange?: (message: string | null) => void
 }
 
-export function PdfViewer({ open, file, currentDir, onClose, onExtracted, onRenamed }: PdfViewerProps) {
+type ResolvedPdfError = {
+  message: string
+  cause: string | null
+}
+
+type ErrorWithCause = Error & { cause?: unknown }
+
+function resolvePdfError(errorValue: unknown, fallback: string): ResolvedPdfError {
+  let rawMessage: unknown = null
+  let rawCause: unknown = null
+
+  if (errorValue instanceof Error) {
+    rawMessage = errorValue.message
+    rawCause = (errorValue as ErrorWithCause).cause
+  } else if (typeof errorValue === 'string') {
+    rawMessage = errorValue
+  } else if (typeof errorValue === 'object' && errorValue !== null) {
+    const errorObject = errorValue as {
+      message?: unknown
+      error?: unknown
+      cause?: unknown
+      details?: unknown
+    }
+    rawMessage = errorObject.message ?? errorObject.error ?? null
+    rawCause = errorObject.cause ?? errorObject.details ?? null
+  }
+
+  let message = typeof rawMessage === 'string' ? rawMessage.trim() : ''
+  let cause = typeof rawCause === 'string' ? rawCause.trim() : null
+
+  if (!message) {
+    message = fallback
+  }
+
+  message = message.replace(/^error while invoking [^:]+:\s*/i, '').trim()
+
+  if (!cause) {
+    const causedByMatch = message.match(/(?:caused by|원인)\s*:?\s*(.+)$/i)
+    if (causedByMatch?.[1]) {
+      cause = causedByMatch[1].trim()
+      message = message.slice(0, causedByMatch.index).trim() || fallback
+    }
+  }
+
+  if (!cause) {
+    const separatorIndex = message.indexOf(': ')
+    const hasWindowsPathPrefix = /^[A-Za-z]:[\\/]/.test(message)
+    if (!hasWindowsPathPrefix && separatorIndex > 0 && separatorIndex < message.length - 2) {
+      const summary = message.slice(0, separatorIndex).trim()
+      const detail = message.slice(separatorIndex + 2).trim()
+      if (summary && detail) {
+        message = summary
+        cause = detail
+      }
+    }
+  }
+
+  if (cause) {
+    cause = cause.replace(/^error while invoking [^:]+:\s*/i, '').trim()
+    if (!cause || cause === message) {
+      cause = null
+    }
+  }
+
+  return { message, cause }
+}
+
+function getAdjustedPageAfterRemoval(currentPage: number, removedPages: number[], totalPages: number): number {
+  if (totalPages <= 0) return 1
+
+  const clampedCurrent = Math.min(Math.max(currentPage, 1), totalPages)
+  const normalizedRemoved = Array.from(
+    new Set(removedPages.filter((page) => page >= 1 && page <= totalPages)),
+  ).sort((a, b) => a - b)
+
+  if (normalizedRemoved.length === 0) {
+    return clampedCurrent
+  }
+
+  const removedSet = new Set(normalizedRemoved)
+  let anchorOldPage = clampedCurrent
+
+  if (removedSet.has(anchorOldPage)) {
+    let nextCandidate = anchorOldPage + 1
+    while (nextCandidate <= totalPages && removedSet.has(nextCandidate)) {
+      nextCandidate += 1
+    }
+
+    if (nextCandidate <= totalPages) {
+      anchorOldPage = nextCandidate
+    } else {
+      let prevCandidate = anchorOldPage - 1
+      while (prevCandidate >= 1 && removedSet.has(prevCandidate)) {
+        prevCandidate -= 1
+      }
+      anchorOldPage = Math.max(prevCandidate, 1)
+    }
+  }
+
+  const removedBeforeAnchor = normalizedRemoved.filter((page) => page < anchorOldPage).length
+  const remainingCount = Math.max(totalPages - normalizedRemoved.length, 1)
+  return Math.min(remainingCount, Math.max(1, anchorOldPage - removedBeforeAnchor))
+}
+
+function appendWarningsMessage(baseMessage: string, warnings: string[]): string {
+  if (!warnings.length) return baseMessage
+  return `${baseMessage} (참고: ${warnings.join(' / ')})`
+}
+
+export function PdfViewer({ open, file, currentDir, onClose, onExtracted, onRenamed, onBusyChange }: PdfViewerProps) {
   const [loading, setLoading] = useState(false)
   const [extracting, setExtracting] = useState(false)
+  const [renaming, setRenaming] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [errorCause, setErrorCause] = useState<string | null>(null)
   const [success, setSuccess] = useState<string | null>(null)
   const [pageCount, setPageCount] = useState(0)
   const [thumbs, setThumbs] = useState<Record<number, string>>({})
   const [largePreviews, setLargePreviews] = useState<Record<number, string>>({})
   const [selectedPages, setSelectedPages] = useState<number[]>([])
   const [activePage, setActivePage] = useState(1)
+  const [loadVersion, setLoadVersion] = useState(0)
+  const [pendingScrollPage, setPendingScrollPage] = useState<number | null>(null)
   const [fileNameModalOpen, setFileNameModalOpen] = useState(false)
   const [renameModalOpen, setRenameModalOpen] = useState(false)
   const [zoom, setZoom] = useState(600)
@@ -64,10 +178,55 @@ export function PdfViewer({ open, file, currentDir, onClose, onExtracted, onRena
     }
     if (!open) {
       setViewerFile(null)
+      setPendingScrollPage(null)
     }
   }, [open, file])
 
   const isPdf = viewerFile?.ext.toLowerCase() === 'pdf'
+
+  const setResolvedError = useCallback((errorValue: unknown, fallback: string) => {
+    const resolved = resolvePdfError(errorValue, fallback)
+    setError(resolved.message)
+    setErrorCause(resolved.cause)
+  }, [])
+
+  const busyOverlayContent = useMemo(() => {
+    if (extracting) {
+      return {
+        title: 'PDF 편집 작업을 저장하는 중...',
+        description: '페이지 추출/삭제 결과를 파일에 반영하고 있습니다.',
+      }
+    }
+    if (renaming) {
+      return {
+        title: 'PDF 이름을 변경하는 중...',
+        description: '파일 정보를 업데이트하고 있습니다.',
+      }
+    }
+    if (loading) {
+      return {
+        title: 'PDF를 불러오는 중...',
+        description: '썸네일과 미리보기를 준비하고 있습니다.',
+      }
+    }
+    return null
+  }, [extracting, renaming, loading])
+
+  const interactionLocked = extracting || renaming
+
+  useEffect(() => {
+    if (!onBusyChange) return
+    if (!open || !busyOverlayContent) {
+      onBusyChange(null)
+      return
+    }
+
+    onBusyChange(busyOverlayContent.title)
+  }, [open, busyOverlayContent, onBusyChange])
+
+  useEffect(() => {
+    return () => onBusyChange?.(null)
+  }, [onBusyChange])
 
   // Load PDF thumbnails - depends on viewerFile path
   useEffect(() => {
@@ -84,6 +243,7 @@ export function PdfViewer({ open, file, currentDir, onClose, onExtracted, onRena
     async function loadPdf() {
       setLoading(true)
       setError(null)
+      setErrorCause(null)
       setSuccess(null)
       setThumbs({})
       setLargePreviews({})
@@ -126,7 +286,9 @@ export function PdfViewer({ open, file, currentDir, onClose, onExtracted, onRena
           setThumbs((prev) => ({ ...prev, [pageNumber]: canvas.toDataURL('image/png') }))
         }
       } catch (e) {
-        if (!cancelled) setError(e instanceof Error ? e.message : 'PDF 미리보기 실패')
+        if (!cancelled) {
+          setResolvedError(e, 'PDF 미리보기에 실패했습니다.')
+        }
       } finally {
         if (!cancelled) setLoading(false)
       }
@@ -143,7 +305,7 @@ export function PdfViewer({ open, file, currentDir, onClose, onExtracted, onRena
       setThumbs({})
       setLargePreviews({})
     }
-  }, [open, viewerFile?.path])
+  }, [open, viewerFile?.path, loadVersion, setResolvedError])
 
   // Render large preview lazily via IntersectionObserver
   const renderLargePage = useCallback(async (pageNumber: number) => {
@@ -228,7 +390,7 @@ export function PdfViewer({ open, file, currentDir, onClose, onExtracted, onRena
     if (!open) return
 
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape' && !fileNameModalOpen && !renameModalOpen && !pendingExtract) {
+      if (e.key === 'Escape' && !fileNameModalOpen && !renameModalOpen && !pendingExtract && !interactionLocked) {
         onClose()
       }
       if (e.key === 'Escape' && pendingExtract) {
@@ -238,7 +400,7 @@ export function PdfViewer({ open, file, currentDir, onClose, onExtracted, onRena
 
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [open, onClose, fileNameModalOpen, renameModalOpen, pendingExtract])
+  }, [open, onClose, fileNameModalOpen, renameModalOpen, pendingExtract, interactionLocked])
 
   // Ctrl+Scroll to zoom
   useEffect(() => {
@@ -259,6 +421,7 @@ export function PdfViewer({ open, file, currentDir, onClose, onExtracted, onRena
   }, [open])
 
   const togglePage = (page: number) => {
+    if (interactionLocked) return
     setSelectedPages((prev) => {
       if (prev.includes(page)) {
         return prev.filter((p) => p !== page)
@@ -268,21 +431,34 @@ export function PdfViewer({ open, file, currentDir, onClose, onExtracted, onRena
   }
 
   const selectAll = () => {
+    if (interactionLocked) return
     setSelectedPages(Array.from({ length: pageCount }, (_, i) => i + 1))
   }
 
   const clearSelection = () => {
+    if (interactionLocked) return
     setSelectedPages([])
   }
 
-  const scrollToPage = (pageNum: number) => {
+  const scrollToPage = useCallback((pageNum: number) => {
     const pane = rightPaneRef.current
     if (!pane) return
     const el = pane.querySelector(`[data-page="${pageNum}"]`)
     if (el) {
       el.scrollIntoView({ behavior: 'smooth', block: 'start' })
     }
-  }
+  }, [])
+
+  useEffect(() => {
+    if (!open || loading || pendingScrollPage === null || pageCount <= 0) return
+    const targetPage = Math.min(Math.max(pendingScrollPage, 1), pageCount)
+    setActivePage(targetPage)
+    const raf = window.requestAnimationFrame(() => {
+      scrollToPage(targetPage)
+    })
+    setPendingScrollPage(null)
+    return () => window.cancelAnimationFrame(raf)
+  }, [open, loading, pendingScrollPage, pageCount, scrollToPage])
 
   const selectionIndex = useCallback(
     (page: number) => {
@@ -292,7 +468,7 @@ export function PdfViewer({ open, file, currentDir, onClose, onExtracted, onRena
     [selectedPages],
   )
 
-  const canExtract = selectedPages.length > 0 && !!viewerFile && !extracting
+  const canExtract = selectedPages.length > 0 && !!viewerFile && !loading && !interactionLocked
 
   const selectedCountLabel = useMemo(() => `${selectedPages.length}/${pageCount} 선택`, [selectedPages.length, pageCount])
 
@@ -322,6 +498,7 @@ export function PdfViewer({ open, file, currentDir, onClose, onExtracted, onRena
     setPendingExtract(null)
     setExtracting(true)
     setError(null)
+    setErrorCause(null)
     setSuccess(null)
 
     try {
@@ -329,23 +506,38 @@ export function PdfViewer({ open, file, currentDir, onClose, onExtracted, onRena
       const outputPath = toCustomNamePdfPath(dir, fileName)
 
       if (destructive) {
+        const totalPagesBeforeExtract = pageCount > 0 ? pageCount : Math.max(activePage, ...sortedPages)
+        const nextPage = getAdjustedPageAfterRemoval(activePage, sortedPages, totalPagesBeforeExtract)
         const result = await invoke<ExtractAndRemoveResult>('extract_and_remove_pdf_pages', {
           inputPath: viewerFile.path,
           pages: sortedPages,
           outputPath,
         })
-        setSuccess(`${result.extractedCount}개 페이지를 추출하고, 원본에 ${result.remainingCount}개 페이지가 남았습니다.`)
+        if (result.remainingPath !== viewerFile.path) {
+          const nextName = result.remainingPath.split(/[\\/]/).pop() ?? viewerFile.name
+          setViewerFile((prev) => (prev ? { ...prev, id: result.remainingPath, path: result.remainingPath, name: nextName } : prev))
+          onRenamed(viewerFile.path, result.remainingPath)
+        }
+        setSuccess(
+          appendWarningsMessage(
+            `${result.extractedCount}개 페이지를 추출하고, 원본에 ${result.remainingCount}개 페이지가 남았습니다.`,
+            result.warnings,
+          ),
+        )
+        setPendingScrollPage(nextPage)
+        setLoadVersion((prev) => prev + 1)
         onExtracted()
       } else {
-        await invoke('extract_pdf_pages', {
+        const result = await invoke<ExtractResult>('extract_pdf_pages', {
           inputPath: viewerFile.path,
           pages: sortedPages,
           outputPath,
         })
-        setSuccess(`${sortedPages.length}개 페이지를 추출했습니다: ${fileName}`)
+        setErrorCause(null)
+        setSuccess(appendWarningsMessage(`${result.pageCount}개 페이지를 추출했습니다: ${fileName}`, result.warnings))
       }
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e))
+      setResolvedError(e, destructive ? '페이지 추출 및 원본 수정에 실패했습니다.' : '페이지 추출에 실패했습니다.')
     } finally {
       setExtracting(false)
     }
@@ -356,6 +548,9 @@ export function PdfViewer({ open, file, currentDir, onClose, onExtracted, onRena
   const handleRenameConfirm = async (newName: string) => {
     if (!viewerFile) return
     setRenameModalOpen(false)
+    setRenaming(true)
+    setError(null)
+    setErrorCause(null)
     try {
       const finalName = newName.toLowerCase().endsWith('.pdf') ? newName : `${newName}.pdf`
       const oldPath = viewerFile.path
@@ -368,7 +563,9 @@ export function PdfViewer({ open, file, currentDir, onClose, onExtracted, onRena
       setSuccess(`이름이 변경되었습니다: ${finalName}`)
       onRenamed(oldPath, newPath)
     } catch (e) {
-      setError(e instanceof Error ? e.message : '이름 변경에 실패했습니다.')
+      setResolvedError(e, '이름 변경에 실패했습니다.')
+    } finally {
+      setRenaming(false)
     }
   }
 
@@ -384,10 +581,10 @@ export function PdfViewer({ open, file, currentDir, onClose, onExtracted, onRena
             <p className="file-subtitle">{pageCount > 0 ? `${pageCount}페이지` : 'Loading...'}</p>
           </div>
           <div style={{ display: 'flex', gap: 8 }}>
-            <button className="ghost" onClick={() => setRenameModalOpen(true)} disabled={!viewerFile}>
+            <button className="ghost" onClick={() => setRenameModalOpen(true)} disabled={!viewerFile || loading || interactionLocked}>
               이름 바꾸기
             </button>
-            <button className="ghost" onClick={onClose}>
+            <button className="ghost" onClick={onClose} disabled={interactionLocked}>
               닫기
             </button>
           </div>
@@ -396,10 +593,10 @@ export function PdfViewer({ open, file, currentDir, onClose, onExtracted, onRena
         {/* Toolbar */}
         {isPdf && (
           <div className="modal-toolbar" style={{ padding: '0 16px 4px', gap: '8px', flexWrap: 'wrap' }}>
-            <button className="ghost" onClick={selectAll} disabled={loading || pageCount === 0}>
+            <button className="ghost" onClick={selectAll} disabled={loading || pageCount === 0 || interactionLocked}>
               전체 선택
             </button>
-            <button className="ghost" onClick={clearSelection} disabled={loading || selectedPages.length === 0}>
+            <button className="ghost" onClick={clearSelection} disabled={loading || selectedPages.length === 0 || interactionLocked}>
               선택 해제
             </button>
             <span className="meta-pill">{selectedCountLabel}</span>
@@ -412,9 +609,9 @@ export function PdfViewer({ open, file, currentDir, onClose, onExtracted, onRena
               </div>
             )}
 
-            <button className="ghost" onClick={() => setZoom((z) => Math.max(200, z - 50))}>-</button>
+            <button className="ghost" onClick={() => setZoom((z) => Math.max(200, z - 50))} disabled={interactionLocked}>-</button>
             <span className="meta-pill">{Math.round(zoom / 6)}%</span>
-            <button className="ghost" onClick={() => setZoom((z) => Math.min(1400, z + 50))}>+</button>
+            <button className="ghost" onClick={() => setZoom((z) => Math.min(1400, z + 50))} disabled={interactionLocked}>+</button>
 
             <button className="primary" onClick={handleExtractClick} disabled={!canExtract}>
               {extracting ? '추출 중...' : '선택 추출'}
@@ -500,13 +697,26 @@ export function PdfViewer({ open, file, currentDir, onClose, onExtracted, onRena
 
         {/* Footer */}
         <div className="pdf-viewer-footer">
-          <span style={{ color: error ? 'var(--danger)' : success ? '#0f7e4f' : 'var(--muted)', fontSize: 13 }}>
-            {error ?? success ?? ''}
-          </span>
-          <button className="ghost" onClick={onClose}>
+          <div className="pdf-feedback">
+            <span className={`pdf-feedback-main ${error ? 'error' : success ? 'success' : 'muted'}`}>
+              {error ?? success ?? ''}
+            </span>
+            {errorCause && <span className="pdf-feedback-cause">원인: {errorCause}</span>}
+          </div>
+          <button className="ghost" onClick={onClose} disabled={interactionLocked}>
             닫기
           </button>
         </div>
+
+        {busyOverlayContent && (
+          <div className="pdf-global-loading-overlay" role="status" aria-live="polite" aria-busy="true">
+            <div className="pdf-global-loading-content">
+              <span className="pdf-global-loading-spinner" />
+              <strong>{busyOverlayContent.title}</strong>
+              <span>{busyOverlayContent.description}</span>
+            </div>
+          </div>
+        )}
       </div>
 
       <FileNameModal

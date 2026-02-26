@@ -123,3 +123,33 @@ export function encodeFileSrcUrl(url: string): string {
     return url
   }
 }
+
+export function normalizePathForComparison(path: string): string {
+  const source = stripWindowsVerbatimPrefix(path.trim())
+  if (!source) return ''
+
+  let normalized = source.replace(/\\/g, '/').replace(/\/{2,}/g, '/')
+  if (/^[a-zA-Z]:$/.test(normalized)) {
+    normalized = `${normalized}/`
+  }
+
+  if (normalized.length > 1) {
+    normalized = normalized.replace(/\/+$/, '')
+  }
+
+  const windowsLike = isWindowsPath(source) || /^\/mnt\/[a-zA-Z](?:\/|$)/.test(normalized)
+  return windowsLike ? normalized.toLowerCase() : normalized
+}
+
+export function isSameOrDescendantPath(sourcePath: string, destinationPath: string): boolean {
+  const source = normalizePathForComparison(sourcePath)
+  const destination = normalizePathForComparison(destinationPath)
+  if (!source || !destination) return false
+
+  if (source === destination) {
+    return true
+  }
+
+  const prefix = source.endsWith('/') ? source : `${source}/`
+  return destination.startsWith(prefix)
+}

@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type DragEvent as ReactDragEvent, type RefObject } from 'react'
 import { convertFileSrc, invoke } from '@tauri-apps/api/core'
+import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import {
   DndContext,
@@ -48,12 +49,14 @@ import { BookmarkItem, DriveItem, FileItem, FolderItem, OrderMode, SortMode } fr
 import { mergeManualOrder, sortFiles, sortFolders } from './utils/folderOrder'
 import { extLabel, formatBytes, formatDate } from './utils/format'
 import { encodeFileSrcUrl, getFileDirectory } from './utils/path'
-import { useExplorerStore, type ExplorerEntry, type UndoEntry } from './store/useExplorerStore'
+import { resolvePasteTarget } from './utils/pasteTarget'
+import { useExplorerStore, type ClipboardState, type ExplorerEntry, type UndoEntry } from './store/useExplorerStore'
 
 const BOOKMARK_STORAGE_KEY = 'explorer.bookmarks.v1'
 const ENTRY_DRAG_MIME = 'application/x-windows-explorer-paths'
 const FOLDER_PAGE_SIZE = 300
 const ENTRY_PAGE_SIZE = 300
+const SHARED_CLIPBOARD_EVENT = 'app://shared-clipboard-updated'
 
 type SortableFolderRowProps = {
   folder: FolderItem
@@ -87,6 +90,15 @@ function readDragPayload(event: ReactDragEvent): string[] {
   return []
 }
 
+function hasExplorerDragPayload(event: ReactDragEvent): boolean {
+  const types = Array.from(event.dataTransfer.types)
+  return types.includes(ENTRY_DRAG_MIME) || types.includes('text/plain')
+}
+
+function updateDropEffect(event: ReactDragEvent) {
+  event.dataTransfer.dropEffect = event.ctrlKey || event.metaKey ? 'copy' : 'move'
+}
+
 function SortableFolderRow({
   folder,
   selected,
@@ -99,6 +111,7 @@ function SortableFolderRow({
     id: folder.id,
     disabled: !manualMode,
   })
+  const [dropTargetActive, setDropTargetActive] = useState(false)
 
   const style = {
     transform: CSS.Transform.toString(transform),
@@ -109,7 +122,7 @@ function SortableFolderRow({
     <li
       ref={setNodeRef}
       style={style}
-      className={`sidebar-row ${selected ? 'selected' : ''} ${folder.isHidden ? 'hidden-entry' : ''}`}
+      className={`sidebar-row ${selected ? 'selected' : ''} ${folder.isHidden ? 'hidden-entry' : ''} ${dropTargetActive ? 'drop-target' : ''}`}
       role="option"
       aria-selected={selected}
       tabIndex={0}
@@ -122,9 +135,23 @@ function SortableFolderRow({
           else onClick(folder, { ctrl: e.ctrlKey || e.metaKey })
         }
       }}
-      onDragOver={(event) => event.preventDefault()}
-      onDrop={(event) => {
+      onDragEnter={(event) => {
+        if (!hasExplorerDragPayload(event)) return
         event.preventDefault()
+        setDropTargetActive(true)
+      }}
+      onDragLeave={() => setDropTargetActive(false)}
+      onDragOver={(event) => {
+        if (!hasExplorerDragPayload(event)) return
+        event.preventDefault()
+        updateDropEffect(event)
+        setDropTargetActive(true)
+      }}
+      onDrop={(event) => {
+        setDropTargetActive(false)
+        if (!hasExplorerDragPayload(event)) return
+        event.preventDefault()
+        event.stopPropagation()
         const paths = readDragPayload(event)
         if (!paths.length) return
         onDropEntries(paths, folder.path, event.ctrlKey || event.metaKey)
@@ -161,7 +188,6 @@ type SortableEntryRowProps = {
   onSelect: (entry: ExplorerEntry, modifiers: SelectModifiers) => void
   onOpen: (entry: ExplorerEntry) => void
   onDropEntries: (paths: string[], destinationPath: string, copyMode: boolean) => void
-  onStartInlineRename: (entry: ExplorerEntry) => void
   onInlineRenameChange: (value: string) => void
   onInlineRenameCommit: () => void
   onInlineRenameCancel: () => void
@@ -180,7 +206,6 @@ function SortableEntryRow({
   onSelect,
   onOpen,
   onDropEntries,
-  onStartInlineRename,
   onInlineRenameChange,
   onInlineRenameCommit,
   onInlineRenameCancel,
@@ -190,6 +215,7 @@ function SortableEntryRow({
     id: entry.id,
     disabled: !manualMode,
   })
+  const [dropTargetActive, setDropTargetActive] = useState(false)
 
   const style = {
     transform: CSS.Transform.toString(transform),
@@ -200,7 +226,7 @@ function SortableEntryRow({
     <li
       ref={setNodeRef}
       style={style}
-      className={`table-row ${selected ? 'selected' : ''} ${entry.isHidden ? 'hidden-entry' : ''} ${isCut ? 'cut-entry' : ''}`}
+      className={`table-row ${selected ? 'selected' : ''} ${entry.isHidden ? 'hidden-entry' : ''} ${isCut ? 'cut-entry' : ''} ${dropTargetActive ? 'drop-target' : ''}`}
       role="row"
       aria-selected={selected}
       tabIndex={0}
@@ -209,11 +235,22 @@ function SortableEntryRow({
       onDragOver={(event) => {
         if (entry.kind === 'folder') {
           event.preventDefault()
+          updateDropEffect(event)
+          setDropTargetActive(true)
         }
       }}
-      onDrop={(event) => {
-        if (entry.kind !== 'folder') return
+      onDragEnter={(event) => {
+        if (entry.kind !== 'folder' || !hasExplorerDragPayload(event)) return
         event.preventDefault()
+        setDropTargetActive(true)
+      }}
+      onDragLeave={() => setDropTargetActive(false)}
+      onDrop={(event) => {
+        setDropTargetActive(false)
+        if (entry.kind !== 'folder') return
+        if (!hasExplorerDragPayload(event)) return
+        event.preventDefault()
+        event.stopPropagation()
         const paths = readDragPayload(event)
         if (!paths.length) return
         onDropEntries(paths, entry.path, event.ctrlKey || event.metaKey)
@@ -250,11 +287,6 @@ function SortableEntryRow({
       <span
         role="gridcell"
         className="name-cell"
-        onDoubleClick={(e) => {
-          e.preventDefault()
-          e.stopPropagation()
-          onStartInlineRename(entry)
-        }}
       >
         {entry.kind === 'folder' ? <Folder size={16} /> : entry.ext === 'pdf' ? <FileText size={16} /> : <File size={16} />}
         {isInlineRenaming ? (
@@ -334,6 +366,7 @@ function SortableGalleryCard({
     id: entry.id,
     disabled: !manualMode,
   })
+  const [dropTargetActive, setDropTargetActive] = useState(false)
 
   const style = {
     transform: CSS.Transform.toString(transform),
@@ -344,7 +377,7 @@ function SortableGalleryCard({
     <div
       ref={setNodeRef}
       style={style}
-      className={`gallery-card ${selected ? 'selected' : ''} ${entry.isHidden ? 'hidden-entry' : ''} ${isCut ? 'cut-entry' : ''}`}
+      className={`gallery-card ${selected ? 'selected' : ''} ${entry.isHidden ? 'hidden-entry' : ''} ${isCut ? 'cut-entry' : ''} ${dropTargetActive ? 'drop-target' : ''}`}
       role="button"
       aria-selected={selected}
       tabIndex={0}
@@ -357,11 +390,22 @@ function SortableGalleryCard({
         if (manualMode) return
         if (entry.kind === 'folder') {
           event.preventDefault()
+          updateDropEffect(event)
+          setDropTargetActive(true)
         }
       }}
-      onDrop={(event) => {
-        if (manualMode || entry.kind !== 'folder') return
+      onDragEnter={(event) => {
+        if (manualMode || entry.kind !== 'folder' || !hasExplorerDragPayload(event)) return
         event.preventDefault()
+        setDropTargetActive(true)
+      }}
+      onDragLeave={() => setDropTargetActive(false)}
+      onDrop={(event) => {
+        setDropTargetActive(false)
+        if (manualMode || entry.kind !== 'folder') return
+        if (!hasExplorerDragPayload(event)) return
+        event.preventDefault()
+        event.stopPropagation()
         const paths = readDragPayload(event)
         if (!paths.length) return
         onDropEntries(paths, entry.path, event.ctrlKey || event.metaKey)
@@ -439,15 +483,7 @@ function SortableGalleryCard({
           aria-label={`${entry.name} 이름 편집`}
         />
       ) : (
-        <strong
-          className="gallery-name"
-          title={entry.name}
-          onDoubleClick={(event) => {
-            event.preventDefault()
-            event.stopPropagation()
-            onStartInlineRename(entry)
-          }}
-        >
+        <strong className="gallery-name" title={entry.name}>
           {entry.name}
         </strong>
       )}
@@ -654,6 +690,7 @@ export default function App() {
   )
 
   const selectedPaths = useMemo(() => selectedEntries.map((e) => e.path), [selectedEntries])
+  const canCreateFolder = Boolean(previewPath || currentPath)
 
   const lastSelectedEntry = useMemo(() => {
     if (selectedEntryIds.length === 0) return null
@@ -680,6 +717,27 @@ export default function App() {
       if (typeof message === 'string' && message) return message
     }
     return fallback
+  }
+
+  const normalizeClipboardState = (value: unknown): ClipboardState => {
+    if (!value || typeof value !== 'object') {
+      return null
+    }
+
+    const candidate = value as { mode?: unknown; paths?: unknown }
+    const mode = candidate.mode === 'copy' || candidate.mode === 'cut' ? candidate.mode : null
+    const paths = Array.isArray(candidate.paths)
+      ? candidate.paths.filter((path): path is string => typeof path === 'string' && path.length > 0)
+      : []
+
+    if (!mode || paths.length === 0) {
+      return null
+    }
+
+    return {
+      mode,
+      paths,
+    }
   }
 
   const clearUndoToast = () => {
@@ -901,16 +959,58 @@ export default function App() {
     }
   }
 
+  async function setSharedClipboard(nextClipboard: Exclude<ClipboardState, null>) {
+    await invoke('set_shared_clipboard', { clipboard: nextClipboard })
+  }
+
+  async function clearSharedClipboard() {
+    await invoke('clear_shared_clipboard')
+  }
+
+  function syncClipboard(nextClipboard: ClipboardState) {
+    setClipboard(nextClipboard)
+    if (!nextClipboard) {
+      void clearSharedClipboard().catch((error) => {
+        setError(resolveErrorMessage(error, '클립보드 상태를 초기화하지 못했습니다.'))
+      })
+      return
+    }
+
+    void setSharedClipboard(nextClipboard).catch((error) => {
+      setError(resolveErrorMessage(error, '클립보드 상태를 동기화하지 못했습니다.'))
+    })
+  }
+
+  async function openSecondaryWindow() {
+    try {
+      await invoke('open_second_window')
+    } catch (error) {
+      setError(resolveErrorMessage(error, '두 번째 창을 열지 못했습니다.'))
+    }
+  }
+
   async function pasteClipboard() {
-    if (!clipboard || !previewPath || operationInProgress) return
+    if (!clipboard || operationInProgress) return
+
+    const targetResolution = resolvePasteTarget({
+      selectedFolderTargets: selectedEntries
+        .filter((entry) => entry.kind === 'folder')
+        .map((entry) => entry.path),
+      previewPath,
+      currentPath,
+    })
+    if (targetResolution.error || !targetResolution.targetPath) {
+      setError(targetResolution.error ?? '붙여넣기 대상 폴더를 찾을 수 없습니다.')
+      return
+    }
 
     const completed = await applyPathOperation(
       clipboard.paths,
-      previewPath,
+      targetResolution.targetPath,
       clipboard.mode === 'copy' ? 'copy' : 'move',
     )
     if (completed && clipboard.mode === 'cut') {
-      setClipboard(null)
+      syncClipboard(null)
     }
   }
 
@@ -1185,6 +1285,44 @@ export default function App() {
   }, [bookmarks])
 
   useEffect(() => {
+    let cancelled = false
+
+    invoke<ClipboardState>('get_shared_clipboard')
+      .then((clipboardValue) => {
+        if (cancelled) return
+        setClipboard(normalizeClipboardState(clipboardValue))
+      })
+      .catch(() => {
+        if (cancelled) return
+        setClipboard(null)
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  useEffect(() => {
+    let unlisten: UnlistenFn | undefined
+
+    listen<{ clipboard?: ClipboardState | null }>(SHARED_CLIPBOARD_EVENT, (event) => {
+      setClipboard(normalizeClipboardState(event.payload?.clipboard))
+    })
+      .then((cleanup) => {
+        unlisten = cleanup
+      })
+      .catch(() => {
+        // no-op
+      })
+
+    return () => {
+      if (unlisten) {
+        unlisten()
+      }
+    }
+  }, [])
+
+  useEffect(() => {
     async function bootstrap() {
       try {
         const initialPath = await invoke<string>('get_default_root_path')
@@ -1269,12 +1407,12 @@ export default function App() {
       }
       if (ctrlOrMeta && event.key.toLowerCase() === 'c' && selectedPaths.length > 0 && !operationInProgress) {
         event.preventDefault()
-        setClipboard({ mode: 'copy', paths: [...selectedPaths] })
+        syncClipboard({ mode: 'copy', paths: [...selectedPaths] })
         return
       }
       if (ctrlOrMeta && event.key.toLowerCase() === 'x' && selectedPaths.length > 0 && !operationInProgress) {
         event.preventDefault()
-        setClipboard({ mode: 'cut', paths: [...selectedPaths] })
+        syncClipboard({ mode: 'cut', paths: [...selectedPaths] })
         return
       }
       if (ctrlOrMeta && event.key.toLowerCase() === 'v') {
@@ -1570,18 +1708,20 @@ export default function App() {
     }
   }
 
-  const handleContextMenu = (e: React.MouseEvent, entry: ExplorerEntry) => {
+  const handleContextMenu = (e: React.MouseEvent, _entry: ExplorerEntry) => {
     e.preventDefault()
-    if (inlineRenameId && inlineRenameId !== entry.id) {
-      cancelInlineRename()
+    e.stopPropagation()
+    if (contextMenu !== null) {
+      setContextMenu(null)
     }
-    if (!selectedEntryIdSet.has(entry.id)) {
-      setSelectedEntryIds([entry.id])
-      const entryIndex = entryIndexById.get(entry.id) ?? -1
-      lastClickedIndexRef.current = entryIndex
-      ensureEntryVisible(entryIndex)
+  }
+
+  const handleContentContextMenu = (e: React.MouseEvent) => {
+    e.preventDefault()
+    e.stopPropagation()
+    if (contextMenu !== null) {
+      setContextMenu(null)
     }
-    setContextMenu({ x: e.clientX, y: e.clientY })
   }
 
   const contextMenuItems: ContextMenuItem[] = useMemo(() => {
@@ -1606,14 +1746,14 @@ export default function App() {
         icon: <Copy size={14} />,
         shortcut: 'Ctrl+C',
         disabled: selectedEntries.length === 0,
-        onClick: () => setClipboard({ mode: 'copy', paths: [...selectedPaths] }),
+        onClick: () => syncClipboard({ mode: 'copy', paths: [...selectedPaths] }),
       },
       {
         label: '잘라내기',
         icon: <Scissors size={14} />,
         shortcut: 'Ctrl+X',
         disabled: selectedEntries.length === 0,
-        onClick: () => setClipboard({ mode: 'cut', paths: [...selectedPaths] }),
+        onClick: () => syncClipboard({ mode: 'cut', paths: [...selectedPaths] }),
       },
       {
         label: '붙여넣기',
@@ -1621,6 +1761,13 @@ export default function App() {
         shortcut: 'Ctrl+V',
         disabled: !clipboard,
         onClick: () => void pasteClipboard(),
+      },
+      {
+        label: '새 폴더 만들기',
+        icon: <FolderPlus size={14} />,
+        shortcut: 'Ctrl+Shift+N',
+        disabled: !canCreateFolder || actionInProgress,
+        onClick: () => void createNewFolder(),
       },
       {
         label: '휴지통으로 이동',
@@ -1631,7 +1778,7 @@ export default function App() {
         onClick: () => void deleteSelected(),
       },
     ]
-  }, [contextMenu, selectedEntries, selectedEntryIds, selectedPaths, clipboard])
+  }, [contextMenu, selectedEntries, selectedEntryIds, selectedPaths, clipboard, canCreateFolder, actionInProgress])
 
   const handleAddBookmark = () => {
     const targetPath = previewPath || currentPath
@@ -1683,6 +1830,9 @@ export default function App() {
         <button className="win-btn" onClick={() => void handleRefresh()}>
           <RefreshCcw size={15} /> 새로 고침
         </button>
+        <button className="win-btn" onClick={() => void openSecondaryWindow()}>
+          <Monitor size={15} /> 새 창
+        </button>
 
         <label className="win-field">
           정렬
@@ -1712,14 +1862,14 @@ export default function App() {
           <button
             className="win-btn"
             disabled={operationInProgress || selectedEntries.length === 0}
-            onClick={() => setClipboard({ mode: 'copy', paths: [...selectedPaths] })}
+            onClick={() => syncClipboard({ mode: 'copy', paths: [...selectedPaths] })}
           >
             <Copy size={15} /> 복사
           </button>
           <button
             className="win-btn"
             disabled={operationInProgress || selectedEntries.length === 0}
-            onClick={() => setClipboard({ mode: 'cut', paths: [...selectedPaths] })}
+            onClick={() => syncClipboard({ mode: 'cut', paths: [...selectedPaths] })}
           >
             <Scissors size={15} /> 잘라내기
           </button>
@@ -1857,6 +2007,9 @@ export default function App() {
               {selectedEntries.length > 0 && ` · ${selectedEntries.length}개 선택됨`}
               {clipboard && ` · 클립보드: ${clipboard.mode === 'copy' ? '복사' : '잘라내기'} ${clipboard.paths.length}개`}
             </p>
+            <p style={{ margin: 0, color: 'var(--muted)', fontSize: 12 }}>
+              드래그 기본 동작: 이동 (Ctrl/Cmd를 누르면 복사)
+            </p>
             <div style={{ display: 'flex', gap: 8 }}>
               <button
                 className="win-btn"
@@ -1896,6 +2049,11 @@ export default function App() {
                       setSelectedEntryIds([])
                       lastClickedIndexRef.current = -1
                     }
+                  }}
+                  onContextMenu={(e) => {
+                    if (e.target === e.currentTarget) {
+                      handleContentContextMenu(e)
+                    }
                   }}>
                     {visibleEntries.map((entry) => (
                       <SortableEntryRow
@@ -1913,7 +2071,6 @@ export default function App() {
                         onDropEntries={(paths, destinationPath, copyMode) =>
                           void applyPathOperation(paths, destinationPath, copyMode ? 'copy' : 'move')
                         }
-                        onStartInlineRename={beginInlineRename}
                         onInlineRenameChange={setInlineRenameValue}
                         onInlineRenameCommit={() => void commitInlineRename()}
                         onInlineRenameCancel={cancelInlineRename}
@@ -1956,6 +2113,11 @@ export default function App() {
                         cancelInlineRename()
                         setSelectedEntryIds([])
                         lastClickedIndexRef.current = -1
+                      }
+                    }}
+                    onContextMenu={(e) => {
+                      if (e.target === e.currentTarget) {
+                        handleContentContextMenu(e)
                       }
                     }}
                   >

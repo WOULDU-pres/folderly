@@ -195,6 +195,7 @@ pub fn copy_paths(paths: Vec<String>, destination_dir: String) -> Result<Vec<Str
             .ok_or_else(|| format!("path has no terminal name: {}", display_path(&source)))?
             .to_os_string();
         let destination = unique_destination_path(&destination_root, &file_name);
+        ensure_not_descendant_destination(&source, &destination, "copy")?;
         copy_path_recursive(&source, &destination)?;
         copied_paths.push(display_path(&destination));
     }
@@ -218,14 +219,7 @@ pub fn move_paths(paths: Vec<String>, destination_dir: String) -> Result<Vec<Str
             .ok_or_else(|| format!("path has no terminal name: {}", display_path(&source)))?
             .to_os_string();
         let destination = unique_destination_path(&destination_root, &file_name);
-
-        if destination.starts_with(&source) {
-            return Err(format!(
-                "cannot move {} into its own descendant {}",
-                display_path(&source),
-                display_path(&destination)
-            ));
-        }
+        ensure_not_descendant_destination(&source, &destination, "move")?;
 
         match fs::rename(&source, &destination) {
             Ok(_) => {}
@@ -695,6 +689,22 @@ fn unique_destination_path(destination_root: &Path, source_name: &OsStr) -> Path
     }
 
     destination_root.join(format!("{stem}-copy"))
+}
+
+fn ensure_not_descendant_destination(
+    source: &Path,
+    destination: &Path,
+    operation_name: &str,
+) -> Result<(), String> {
+    if source.is_dir() && destination.starts_with(source) {
+        return Err(format!(
+            "cannot {operation_name} {} into its own descendant {}",
+            display_path(source),
+            display_path(destination)
+        ));
+    }
+
+    Ok(())
 }
 
 fn copy_single_file_with_retry(source: &Path, destination: &Path) -> Result<(), String> {
@@ -1323,6 +1333,40 @@ mod tests {
         assert_eq!(moved.len(), 1);
         assert!(!source_file.exists());
         assert!(PathBuf::from(&moved[0]).exists());
+    }
+
+    #[test]
+    fn copy_paths_rejects_copying_folder_into_its_descendant() {
+        let root = TempDirGuard::new("copy-descendant");
+        let source_folder = root.path().join("source");
+        let child_folder = source_folder.join("child");
+        fs::create_dir_all(&child_folder).expect("create folders");
+        fs::write(source_folder.join("file.txt"), "sample").expect("create source file");
+
+        let err = copy_paths(
+            vec![source_folder.display().to_string()],
+            child_folder.display().to_string(),
+        )
+        .expect_err("copy into descendant should fail");
+
+        assert!(err.contains("cannot copy"));
+    }
+
+    #[test]
+    fn move_paths_rejects_moving_folder_into_its_descendant() {
+        let root = TempDirGuard::new("move-descendant");
+        let source_folder = root.path().join("source");
+        let child_folder = source_folder.join("child");
+        fs::create_dir_all(&child_folder).expect("create folders");
+        fs::write(source_folder.join("file.txt"), "sample").expect("create source file");
+
+        let err = move_paths(
+            vec![source_folder.display().to_string()],
+            child_folder.display().to_string(),
+        )
+        .expect_err("move into descendant should fail");
+
+        assert!(err.contains("cannot move"));
     }
 
     #[test]
