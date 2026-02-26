@@ -30,15 +30,33 @@ const numericFileSample: FileItem[] = [
   { id: 'nf0', name: '0.pdf', path: 'nf0', ext: 'pdf', size: 50, modifiedAt: 10, isHidden: false },
 ]
 
+const lexicalEdgeCaseFiles: FileItem[] = [
+  { id: 'e1', name: '1.pdf', path: 'e1', ext: 'pdf', size: 1, modifiedAt: 1, isHidden: false },
+  { id: 'e10', name: '10.pdf', path: 'e10', ext: 'pdf', size: 1, modifiedAt: 1, isHidden: false },
+  { id: 'e11', name: '11.pdf', path: 'e11', ext: 'pdf', size: 1, modifiedAt: 1, isHidden: false },
+  { id: 'e12', name: '12.pdf', path: 'e12', ext: 'pdf', size: 1, modifiedAt: 1, isHidden: false },
+  { id: 'e2', name: '2.pdf', path: 'e2', ext: 'pdf', size: 1, modifiedAt: 1, isHidden: false },
+]
+
 describe('sortFolders', () => {
   it('sorts by name', () => {
     const sorted = sortFolders(sample, 'name')
     expect(sorted.map((folder) => folder.id)).toEqual(['b', 'a', 'c'])
   })
 
+  it('sorts by name desc', () => {
+    const sorted = sortFolders(sample, 'nameDesc')
+    expect(sorted.map((folder) => folder.id)).toEqual(['c', 'a', 'b'])
+  })
+
   it('sorts by modifiedAt desc', () => {
     const sorted = sortFolders(sample, 'modifiedAt')
     expect(sorted.map((folder) => folder.id)).toEqual(['b', 'c', 'a'])
+  })
+
+  it('sorts by modifiedAt asc', () => {
+    const sorted = sortFolders(sample, 'modifiedAtAsc')
+    expect(sorted.map((folder) => folder.id)).toEqual(['a', 'c', 'b'])
   })
 
   it('falls back to name order for size mode', () => {
@@ -73,8 +91,14 @@ describe('mergeManualOrder', () => {
     const byName = sortFiles(fileSample, 'name')
     expect(byName.map((file) => file.id)).toEqual(['f2', 'f3', 'f1'])
 
+    const byNameDesc = sortFiles(fileSample, 'nameDesc')
+    expect(byNameDesc.map((file) => file.id)).toEqual(['f1', 'f3', 'f2'])
+
     const byDate = sortFiles(fileSample, 'modifiedAt')
     expect(byDate.map((file) => file.id)).toEqual(['f2', 'f3', 'f1'])
+
+    const byDateAsc = sortFiles(fileSample, 'modifiedAtAsc')
+    expect(byDateAsc.map((file) => file.id)).toEqual(['f1', 'f3', 'f2'])
 
     const bySize = sortFiles(fileSample, 'size')
     expect(bySize.map((file) => file.id)).toEqual(['f3', 'f2', 'f1'])
@@ -86,5 +110,10 @@ describe('mergeManualOrder', () => {
   it('sorts numeric-leading file names in natural order', () => {
     const sorted = sortFiles(numericFileSample, 'name')
     expect(sorted.map((file) => file.name)).toEqual(['0.pdf', '1.pdf', '2.pdf', '10.pdf', '11.pdf'])
+  })
+
+  it('sorts numeric names naturally (1,2,3...10,11,12) instead of lexical order', () => {
+    const sorted = sortFiles(lexicalEdgeCaseFiles, 'name')
+    expect(sorted.map((file) => file.name)).toEqual(['1.pdf', '2.pdf', '10.pdf', '11.pdf', '12.pdf'])
   })
 })

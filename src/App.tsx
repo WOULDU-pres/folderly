@@ -57,6 +57,27 @@ const ENTRY_DRAG_MIME = 'application/x-windows-explorer-paths'
 const FOLDER_PAGE_SIZE = 300
 const ENTRY_PAGE_SIZE = 300
 const SHARED_CLIPBOARD_EVENT = 'app://shared-clipboard-updated'
+type SortField = 'name' | 'modifiedAt' | 'size'
+type SortDirection = 'asc' | 'desc'
+
+function resolveSortField(mode: SortMode): SortField {
+  if (mode === 'name' || mode === 'nameDesc') return 'name'
+  if (mode === 'modifiedAt' || mode === 'modifiedAtAsc') return 'modifiedAt'
+  return 'size'
+}
+
+function resolveSortDirection(mode: SortMode): SortDirection {
+  if (mode === 'name') return 'asc'
+  if (mode === 'nameDesc') return 'desc'
+  if (mode === 'modifiedAtAsc') return 'asc'
+  return 'desc'
+}
+
+function toSortMode(field: SortField, direction: SortDirection): SortMode {
+  if (field === 'name') return direction === 'asc' ? 'name' : 'nameDesc'
+  if (field === 'modifiedAt') return direction === 'asc' ? 'modifiedAtAsc' : 'modifiedAt'
+  return 'size'
+}
 
 type SortableFolderRowProps = {
   folder: FolderItem
@@ -691,6 +712,8 @@ export default function App() {
 
   const selectedPaths = useMemo(() => selectedEntries.map((e) => e.path), [selectedEntries])
   const canCreateFolder = Boolean(previewPath || currentPath)
+  const activeSortField = useMemo(() => resolveSortField(sortMode), [sortMode])
+  const activeSortDirection = useMemo(() => resolveSortDirection(sortMode), [sortMode])
 
   const lastSelectedEntry = useMemo(() => {
     if (selectedEntryIds.length === 0) return null
@@ -1708,20 +1731,28 @@ export default function App() {
     }
   }
 
-  const handleContextMenu = (e: React.MouseEvent, _entry: ExplorerEntry) => {
+  const handleContextMenu = (e: React.MouseEvent, entry: ExplorerEntry) => {
     e.preventDefault()
     e.stopPropagation()
-    if (contextMenu !== null) {
-      setContextMenu(null)
+    if (inlineRenameId && inlineRenameId !== entry.id) {
+      cancelInlineRename()
     }
+    if (!selectedEntryIdSet.has(entry.id)) {
+      setSelectedEntryIds([entry.id])
+      const entryIndex = entryIndexById.get(entry.id) ?? -1
+      lastClickedIndexRef.current = entryIndex
+      ensureEntryVisible(entryIndex)
+    }
+    setContextMenu({ x: e.clientX, y: e.clientY })
   }
 
   const handleContentContextMenu = (e: React.MouseEvent) => {
     e.preventDefault()
     e.stopPropagation()
-    if (contextMenu !== null) {
-      setContextMenu(null)
-    }
+    cancelInlineRename()
+    setSelectedEntryIds([])
+    lastClickedIndexRef.current = -1
+    setContextMenu({ x: e.clientX, y: e.clientY })
   }
 
   const contextMenuItems: ContextMenuItem[] = useMemo(() => {
@@ -1803,6 +1834,16 @@ export default function App() {
     setBookmarks((prev) => prev.filter((item) => item.id !== id))
   }
 
+  const handleSortFieldChange = (field: SortField) => {
+    const nextDirection = field === 'size' ? 'desc' : activeSortDirection
+    setSortMode(toSortMode(field, nextDirection))
+  }
+
+  const handleSortDirectionChange = (direction: SortDirection) => {
+    if (activeSortField === 'size') return
+    setSortMode(toSortMode(activeSortField, direction))
+  }
+
   return (
     <div className="explorer-app" role="application" aria-label="Windows style explorer">
       <header className="window-header">
@@ -1834,18 +1875,52 @@ export default function App() {
           <Monitor size={15} /> 새 창
         </button>
 
-        <label className="win-field">
-          정렬
-          <select
-            value={sortMode}
-            onChange={(event) => setSortMode(event.target.value as SortMode)}
-            disabled={orderMode === 'manual'}
-          >
-            <option value="name">이름</option>
-            <option value="size">크기</option>
-            <option value="modifiedAt">수정일</option>
-          </select>
-        </label>
+        <div className="sort-controls" aria-label="정렬 옵션">
+          <div className="sort-chip-group" role="group" aria-label="정렬 기준">
+            <button
+              type="button"
+              className={`sort-chip ${activeSortField === 'name' ? 'active' : ''}`}
+              disabled={orderMode === 'manual'}
+              onClick={() => handleSortFieldChange('name')}
+            >
+              이름
+            </button>
+            <button
+              type="button"
+              className={`sort-chip ${activeSortField === 'modifiedAt' ? 'active' : ''}`}
+              disabled={orderMode === 'manual'}
+              onClick={() => handleSortFieldChange('modifiedAt')}
+            >
+              수정일
+            </button>
+            <button
+              type="button"
+              className={`sort-chip ${activeSortField === 'size' ? 'active' : ''}`}
+              disabled={orderMode === 'manual'}
+              onClick={() => handleSortFieldChange('size')}
+            >
+              크기
+            </button>
+          </div>
+          <div className="sort-chip-group" role="group" aria-label="정렬 방향">
+            <button
+              type="button"
+              className={`sort-chip ${activeSortDirection === 'asc' ? 'active' : ''}`}
+              disabled={orderMode === 'manual' || activeSortField === 'size'}
+              onClick={() => handleSortDirectionChange('asc')}
+            >
+              정방향
+            </button>
+            <button
+              type="button"
+              className={`sort-chip ${activeSortDirection === 'desc' ? 'active' : ''}`}
+              disabled={orderMode === 'manual' || activeSortField === 'size'}
+              onClick={() => handleSortDirectionChange('desc')}
+            >
+              역순
+            </button>
+          </div>
+        </div>
 
         <button className={`win-btn ${orderMode === 'manual' ? 'active' : ''}`} onClick={() => void handleOrderModeToggle()}>
           수동 정렬 {orderMode === 'manual' ? 'ON' : 'OFF'}
@@ -1854,35 +1929,6 @@ export default function App() {
         <button className="win-btn" onClick={handleAddBookmark}>
           <BookmarkPlus size={16} /> 북마크 고정
         </button>
-        <button className="win-btn" disabled={actionInProgress} onClick={() => void createNewFolder()}>
-          <FolderPlus size={16} /> 새 폴더
-        </button>
-
-        <div className="quick-actions">
-          <button
-            className="win-btn"
-            disabled={operationInProgress || selectedEntries.length === 0}
-            onClick={() => syncClipboard({ mode: 'copy', paths: [...selectedPaths] })}
-          >
-            <Copy size={15} /> 복사
-          </button>
-          <button
-            className="win-btn"
-            disabled={operationInProgress || selectedEntries.length === 0}
-            onClick={() => syncClipboard({ mode: 'cut', paths: [...selectedPaths] })}
-          >
-            <Scissors size={15} /> 잘라내기
-          </button>
-          <button className="win-btn" disabled={operationInProgress || !clipboard} onClick={() => void pasteClipboard()}>
-            <ClipboardPaste size={15} /> 붙여넣기
-          </button>
-          <button className="win-btn" disabled={selectedEntryIds.length !== 1 || actionInProgress} onClick={() => void renameSelected()}>
-            <Pencil size={15} /> 이름 바꾸기(F2)
-          </button>
-          <button className="win-btn" disabled={selectedEntries.length === 0 || actionInProgress} onClick={() => void deleteSelected()}>
-            <Trash2 size={15} /> 휴지통으로 이동
-          </button>
-        </div>
 
         <SearchBar value={searchQuery} onChange={setSearchQuery} />
 
@@ -2000,17 +2046,17 @@ export default function App() {
 
         <section className="content-pane">
           <div className="pane-head">
-            <p style={{ margin: 0, color: 'var(--muted)' }}>
+            <p className="pane-summary">
               {displayEntries.length}개 항목
               {hasMoreEntries && ` · ${visibleEntries.length}개 표시 중`}
               {selectedSidebarFolderIds.length > 1 && ` · 폴더 ${selectedSidebarFolderIds.length}개 통합 보기`}
               {selectedEntries.length > 0 && ` · ${selectedEntries.length}개 선택됨`}
               {clipboard && ` · 클립보드: ${clipboard.mode === 'copy' ? '복사' : '잘라내기'} ${clipboard.paths.length}개`}
             </p>
-            <p style={{ margin: 0, color: 'var(--muted)', fontSize: 12 }}>
+            <p className="pane-hint">
               드래그 기본 동작: 이동 (Ctrl/Cmd를 누르면 복사)
             </p>
-            <div style={{ display: 'flex', gap: 8 }}>
+            <div className="pane-actions">
               <button
                 className="win-btn"
                 style={{ borderColor: 'var(--border)' }}
