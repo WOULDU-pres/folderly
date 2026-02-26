@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { KeyboardEvent as ReactKeyboardEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import { ExtractAndRemoveResult, ExtractResult, FileItem } from '../types'
 import { getFileDirectory, getFileNameWithoutExt, toCustomNamePdfPath } from '../utils/path'
@@ -188,6 +188,7 @@ export function PdfViewer({ open, file, currentDir, onClose, onExtracted, onRena
   const rightPaneRef = useRef<HTMLDivElement>(null)
   const thumbRefs = useRef<Record<number, HTMLDivElement | null>>({})
   const largePageRefs = useRef<Record<number, HTMLDivElement | null>>({})
+  const pendingExtractPrimaryRef = useRef<HTMLButtonElement>(null)
   const observerRef = useRef<IntersectionObserver | null>(null)
   const pdfDocRef = useRef<PdfDocumentProxy | null>(null)
 
@@ -455,19 +456,33 @@ export function PdfViewer({ open, file, currentDir, onClose, onExtracted, onRena
       if (e.key === 'Escape' && !fileNameModalOpen && !renameModalOpen && !pendingExtract && !interactionLocked) {
         onClose()
       }
-      if (e.key === 'Escape' && pendingExtract) {
-        setPendingExtract(null)
-        return
-      }
-      if (e.key === 'Enter' && pendingExtract && !interactionLocked) {
-        e.preventDefault()
-        void doExtract(pendingExtract.fileName, pendingExtract.pages, true)
-      }
     }
 
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [open, onClose, fileNameModalOpen, renameModalOpen, pendingExtract, interactionLocked, doExtract])
+  }, [open, onClose, fileNameModalOpen, renameModalOpen, pendingExtract, interactionLocked])
+
+  useEffect(() => {
+    if (!pendingExtract) return
+    const raf = window.requestAnimationFrame(() => {
+      pendingExtractPrimaryRef.current?.focus()
+    })
+    return () => window.cancelAnimationFrame(raf)
+  }, [pendingExtract])
+
+  const handlePendingExtractKeyDown = useCallback((event: ReactKeyboardEvent<HTMLDivElement>) => {
+    if (interactionLocked) return
+    if (event.key === 'Escape') {
+      setPendingExtract(null)
+      return
+    }
+    if (event.key === 'Enter') {
+      event.preventDefault()
+      if (pendingExtract) {
+        void doExtract(pendingExtract.fileName, pendingExtract.pages, true)
+      }
+    }
+  }, [doExtract, interactionLocked, pendingExtract])
 
   const viewerCardRef = useRef<HTMLDivElement>(null)
 
@@ -812,7 +827,15 @@ export function PdfViewer({ open, file, currentDir, onClose, onExtracted, onRena
       />
 
       {pendingExtract && (
-        <div className="modal-overlay" role="dialog" aria-modal="true" aria-label="추출 확인" style={{ zIndex: 50 }}>
+        <div
+          className="modal-overlay"
+          role="dialog"
+          aria-modal="true"
+          aria-label="추출 확인"
+          style={{ zIndex: 50 }}
+          tabIndex={-1}
+          onKeyDown={handlePendingExtractKeyDown}
+        >
           <div
             style={{
               width: 'min(440px, 90vw)',
@@ -837,12 +860,23 @@ export function PdfViewer({ open, file, currentDir, onClose, onExtracted, onRena
               <button
                 className="ghost"
                 onClick={() => void doExtract(pendingExtract.fileName, pendingExtract.pages, false)}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter') {
+                    event.stopPropagation()
+                  }
+                }}
               >
                 추출만
               </button>
               <button
                 className="primary"
                 onClick={() => void doExtract(pendingExtract.fileName, pendingExtract.pages, true)}
+                ref={pendingExtractPrimaryRef}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter') {
+                    event.stopPropagation()
+                  }
+                }}
               >
                 추출 및 제거
               </button>
