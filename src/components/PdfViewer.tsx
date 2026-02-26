@@ -3,6 +3,7 @@ import { invoke } from '@tauri-apps/api/core'
 import { ExtractAndRemoveResult, FileItem } from '../types'
 import { getFileDirectory, getFileNameWithoutExt, toCustomNamePdfPath } from '../utils/path'
 import { FileNameModal } from './FileNameModal'
+import { ProgressBar } from './ProgressBar'
 
 import * as pdfjs from 'pdfjs-dist/legacy/build/pdf.mjs'
 
@@ -404,6 +405,12 @@ export function PdfViewer({ open, file, currentDir, onClose, onExtracted, onRena
             <span className="meta-pill">{selectedCountLabel}</span>
 
             <div style={{ flex: 1 }} />
+
+            {loading && pageCount > 0 && (
+              <div style={{ minWidth: 150 }}>
+                <ProgressBar current={Object.keys(thumbs).length} total={pageCount} label={`썸네일 ${Object.keys(thumbs).length}/${pageCount}`} />
+              </div>
+            )}
 
             <button className="ghost" onClick={() => setZoom((z) => Math.max(200, z - 50))}>-</button>
             <span className="meta-pill">{Math.round(zoom / 6)}%</span>

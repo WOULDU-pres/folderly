@@ -546,6 +546,17 @@ export default function App() {
     try {
       const renamedPath = await invoke<string>('rename_path', { path: entry.path, newName: nextName.trim() })
       setSelectedEntryIds([renamedPath])
+
+      // Sync order DB with the new path
+      const parentPath = previewPath || currentPath
+      if (parentPath) {
+        await invoke('rename_order_entry', {
+          parentPath,
+          oldId: entry.id,
+          newId: renamedPath,
+        }).catch(() => { /* order sync is best-effort */ })
+      }
+
       await refreshExplorer()
     } catch (e) {
       setError(e instanceof Error ? e.message : '이름 변경에 실패했습니다.')

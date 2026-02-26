@@ -4,6 +4,7 @@ import * as pdfjs from 'pdfjs-dist/legacy/build/pdf.mjs'
 import { FileItem, MergeResult, MergeSource } from '../types'
 import { toCustomNamePdfPath } from '../utils/path'
 import { FileNameModal } from './FileNameModal'
+import { ProgressBar } from './ProgressBar'
 
 ;(pdfjs as unknown as { GlobalWorkerOptions: { workerSrc: string } }).GlobalWorkerOptions.workerSrc = new URL(
   'pdfjs-dist/legacy/build/pdf.worker.min.mjs',
@@ -232,7 +233,7 @@ export function PdfMergeModal({ open, pdfFiles, currentDir, onClose, onMerged }:
                       padding: '8px 12px',
                       borderRadius: 8,
                       border: selected ? '1px solid var(--accent)' : '1px solid var(--border)',
-                      background: selected ? 'var(--accent-soft)' : '#fff',
+                      background: selected ? 'var(--accent-soft)' : 'var(--bg-card, #fff)',
                       cursor: 'pointer',
                       textAlign: 'left',
                       transition: 'all 150ms ease',
@@ -351,9 +352,15 @@ export function PdfMergeModal({ open, pdfFiles, currentDir, onClose, onMerged }:
         </div>
 
         <footer className="modal-footer" style={{ padding: '10px 14px' }}>
-          <span style={{ color: error ? 'var(--danger)' : success ? '#0f7e4f' : 'var(--muted)', fontSize: 13, flex: 1 }}>
-            {error ?? success ?? ''}
-          </span>
+          {merging ? (
+            <div style={{ flex: 1, maxWidth: 300 }}>
+              <ProgressBar current={0} total={1} label="병합 중..." />
+            </div>
+          ) : (
+            <span style={{ color: error ? 'var(--danger)' : success ? 'var(--success, #0f7e4f)' : 'var(--muted)', fontSize: 13, flex: 1 }}>
+              {error ?? success ?? ''}
+            </span>
+          )}
           <button className="ghost" onClick={onClose}>
             취소
           </button>
