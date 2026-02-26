@@ -62,6 +62,7 @@ const ENTRY_DRAG_MIME = 'application/x-windows-explorer-paths'
 const FOLDER_PAGE_SIZE = 300
 const ENTRY_PAGE_SIZE = 300
 const SHARED_CLIPBOARD_EVENT = 'app://shared-clipboard-updated'
+const SHARED_CLIPBOARD_LOCAL_KEY = 'explorer.sharedClipboard.v1'
 type SortField = 'name' | 'modifiedAt' | 'size'
 type SortDirection = 'asc' | 'desc'
 
@@ -94,9 +95,13 @@ type SortableFolderRowProps = {
 }
 
 function writeDragPayload(event: ReactDragEvent, paths: string[]) {
-  const payload = JSON.stringify(paths)
+  const normalizedPaths = normalizeDragPaths(paths)
+  const payload = JSON.stringify(normalizedPaths)
+  const plainPayload = normalizedPaths.join('\n')
+
   event.dataTransfer.setData(ENTRY_DRAG_MIME, payload)
-  event.dataTransfer.setData('text/plain', payload)
+  event.dataTransfer.setData('text/plain', plainPayload)
+  event.dataTransfer.setData('text/uri-list', normalizedPaths.map(toFileUriPath).join('\n'))
   event.dataTransfer.effectAllowed = 'copyMove'
 }
 
@@ -123,6 +128,30 @@ function decodeFileUriPath(value: string): string {
   } catch {
     return value
   }
+}
+
+function toFileUriPath(path: string): string {
+  const normalized = path.replace(/\\/g, '/')
+  if (/^[A-Za-z]:\//.test(normalized)) {
+    return `file:///${encodeURI(normalized)}`
+  }
+
+  return `file:///${encodeURI(normalized.replace(/^\/+/, ''))}`
+}
+
+function extractDroppedFilePaths(event: ReactDragEvent): string[] {
+  if (!event.dataTransfer.files || event.dataTransfer.files.length === 0) return []
+
+  const paths: string[] = []
+  for (let index = 0; index < event.dataTransfer.files.length; index += 1) {
+    const entry = event.dataTransfer.files[index] as File & { path?: string }
+    const path = typeof entry.path === 'string' ? entry.path.trim() : ''
+    if (path) {
+      paths.push(path)
+    }
+  }
+
+  return normalizeDragPaths(paths)
 }
 
 function parseDragPayload(payload: string): string[] {
@@ -169,7 +198,15 @@ function readDragPayload(event: ReactDragEvent): string[] {
 
   const plainTextPayload = event.dataTransfer.getData('text/plain')
   if (plainTextPayload) {
-    return parseDragPayload(plainTextPayload)
+    const parsed = parseDragPayload(plainTextPayload)
+    if (parsed.length > 0) {
+      return parsed
+    }
+  }
+
+  const fileListPaths = extractDroppedFilePaths(event)
+  if (fileListPaths.length > 0) {
+    return fileListPaths
   }
 
   return []
@@ -177,7 +214,49 @@ function readDragPayload(event: ReactDragEvent): string[] {
 
 function hasExplorerDragPayload(event: ReactDragEvent): boolean {
   const types = Array.from(event.dataTransfer.types)
-  return types.includes(ENTRY_DRAG_MIME) || types.includes('text/plain') || types.includes('text/uri-list')
+  if (
+    types.includes(ENTRY_DRAG_MIME) ||
+    types.includes('text/plain') ||
+    types.includes('text/uri-list') ||
+    types.includes('Files')
+  ) {
+    return true
+  }
+
+  return extractDroppedFilePaths(event).length > 0
+}
+
+function readLocalClipboardState(): ClipboardState {
+  try {
+    const raw = window.localStorage.getItem(SHARED_CLIPBOARD_LOCAL_KEY)
+    if (!raw) return null
+
+    const parsed = JSON.parse(raw)
+    if (!parsed || typeof parsed !== 'object') return null
+
+    const maybe = parsed as { mode?: unknown; paths?: unknown }
+    const mode = maybe.mode === 'copy' || maybe.mode === 'cut' ? maybe.mode : null
+    if (!mode || !Array.isArray(maybe.paths)) return null
+
+    const paths = maybe.paths.filter((path): path is string => typeof path === 'string' && path.trim().length > 0)
+    if (!paths.length) return null
+
+    return { mode, paths }
+  } catch {
+    return null
+  }
+}
+
+function writeLocalClipboardState(nextClipboard: ClipboardState): void {
+  try {
+    if (!nextClipboard) {
+      window.localStorage.removeItem(SHARED_CLIPBOARD_LOCAL_KEY)
+      return
+    }
+    window.localStorage.setItem(SHARED_CLIPBOARD_LOCAL_KEY, JSON.stringify(nextClipboard))
+  } catch {
+    // localStorage may be unavailable in constrained environments
+  }
 }
 
 function updateDropEffect(event: ReactDragEvent) {
@@ -1081,15 +1160,17 @@ export default function App() {
       const normalized = normalizeClipboardState(shared)
       if (normalized) {
         setClipboard(normalized)
+        writeLocalClipboardState(normalized)
       }
       return normalized
     } catch {
-      return null
+      return readLocalClipboardState()
     }
   }
 
   function syncClipboard(nextClipboard: ClipboardState) {
     setClipboard(nextClipboard)
+    writeLocalClipboardState(nextClipboard)
     if (!nextClipboard) {
       void clearSharedClipboard().catch((error) => {
         setError(resolveErrorMessage(error, '클립보드 상태를 초기화하지 못했습니다.'))
@@ -1112,7 +1193,10 @@ export default function App() {
 
   async function pasteClipboard() {
     if (operationInProgress) return
-    const effectiveClipboard = clipboard ?? await getLatestSharedClipboard()
+    const effectiveClipboard =
+      clipboard ??
+      (await getLatestSharedClipboard()) ??
+      readLocalClipboardState()
     if (!effectiveClipboard) return
 
     const targetResolution = resolvePasteTarget({
@@ -1452,11 +1536,13 @@ export default function App() {
     invoke<ClipboardState>('get_shared_clipboard')
       .then((clipboardValue) => {
         if (cancelled) return
-        setClipboard(normalizeClipboardState(clipboardValue))
+        const normalized = normalizeClipboardState(clipboardValue) ?? readLocalClipboardState()
+        setClipboard(normalized)
+        writeLocalClipboardState(normalized)
       })
       .catch(() => {
         if (cancelled) return
-        setClipboard(null)
+        setClipboard(readLocalClipboardState())
       })
 
     return () => {
@@ -1468,7 +1554,9 @@ export default function App() {
     let unlisten: UnlistenFn | undefined
 
     listen<{ clipboard?: ClipboardState | null }>(SHARED_CLIPBOARD_EVENT, (event) => {
-      setClipboard(normalizeClipboardState(event.payload?.clipboard))
+      const nextClipboard = normalizeClipboardState(event.payload?.clipboard)
+      setClipboard(nextClipboard)
+      writeLocalClipboardState(nextClipboard)
     })
       .then((cleanup) => {
         unlisten = cleanup

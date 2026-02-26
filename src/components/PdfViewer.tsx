@@ -502,8 +502,8 @@ export function PdfViewer({ open, file, currentDir, onClose, onExtracted, onRena
       setZoom((prev) => Math.min(1400, Math.max(200, prev + delta)))
     }
 
-    container.addEventListener('wheel', handleWheel, { passive: false, capture: true })
-    return () => container.removeEventListener('wheel', handleWheel, { capture: true })
+    document.addEventListener('wheel', handleWheel, { passive: false, capture: true })
+    return () => document.removeEventListener('wheel', handleWheel, { capture: true })
   }, [open, interactionLocked])
 
   const togglePage = (page: number) => {
