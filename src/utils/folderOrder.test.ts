@@ -24,6 +24,11 @@ describe('sortFolders', () => {
     const sorted = sortFolders(sample, 'modifiedAt')
     expect(sorted.map((folder) => folder.id)).toEqual(['b', 'c', 'a'])
   })
+
+  it('falls back to name order for size mode', () => {
+    const sorted = sortFolders(sample, 'size')
+    expect(sorted.map((folder) => folder.id)).toEqual(['b', 'a', 'c'])
+  })
 })
 
 describe('mergeManualOrder', () => {
@@ -43,6 +48,9 @@ describe('mergeManualOrder', () => {
 
     const byDate = sortFiles(fileSample, 'modifiedAt')
     expect(byDate.map((file) => file.id)).toEqual(['f2', 'f3', 'f1'])
+
+    const bySize = sortFiles(fileSample, 'size')
+    expect(bySize.map((file) => file.id)).toEqual(['f3', 'f2', 'f1'])
 
     const manual = mergeManualOrder(byName, ['f1', 'f2'])
     expect(manual.map((file) => file.id)).toEqual(['f1', 'f2', 'f3'])

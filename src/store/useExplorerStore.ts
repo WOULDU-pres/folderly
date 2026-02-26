@@ -3,6 +3,14 @@ import { BookmarkItem, DriveItem, FileItem, FolderItem, OrderMode, SortMode, Vie
 
 export type ExplorerEntry = ({ kind: 'folder' } & FolderItem) | ({ kind: 'file' } & FileItem)
 export type ClipboardState = { mode: 'copy' | 'cut'; paths: string[] } | null
+export type UndoMoveMapping = { fromPath: string; toPath: string }
+export type UndoEntry =
+  | { type: 'rename'; label: string; oldPath: string; newPath: string }
+  | { type: 'move'; label: string; mappings: UndoMoveMapping[] }
+  | { type: 'copy'; label: string; copiedPaths: string[] }
+  | { type: 'delete'; label: string; deletedPaths: string[] }
+
+const MAX_UNDO_STACK_SIZE = 50
 
 interface NavigationSlice {
   currentPath: string
@@ -33,6 +41,10 @@ interface UISlice {
   actionInProgress: boolean
 }
 
+interface UndoSlice {
+  undoStack: UndoEntry[]
+}
+
 interface Actions {
   setCurrentPath: (path: string) => void
   setPreviewPath: (path: string) => void
@@ -54,11 +66,14 @@ interface Actions {
   setOperationInProgress: (inProgress: boolean) => void
   setOperationStatus: (status: string | null) => void
   setActionInProgress: (inProgress: boolean) => void
+  pushUndoEntry: (entry: UndoEntry) => void
+  popUndoEntry: () => UndoEntry | null
+  clearUndoStack: () => void
 }
 
-export type ExplorerStore = NavigationSlice & SelectionSlice & UISlice & Actions
+export type ExplorerStore = NavigationSlice & SelectionSlice & UISlice & UndoSlice & Actions
 
-export const useExplorerStore = create<ExplorerStore>((set) => ({
+export const useExplorerStore = create<ExplorerStore>((set, get) => ({
   // Navigation
   currentPath: '',
   previewPath: '',
@@ -84,6 +99,7 @@ export const useExplorerStore = create<ExplorerStore>((set) => ({
   operationInProgress: false,
   operationStatus: null,
   actionInProgress: false,
+  undoStack: [],
 
   // Actions
   setCurrentPath: (path) => set({ currentPath: path }),
@@ -115,6 +131,26 @@ export const useExplorerStore = create<ExplorerStore>((set) => ({
   setOperationInProgress: (inProgress) => set({ operationInProgress: inProgress }),
   setOperationStatus: (status) => set({ operationStatus: status }),
   setActionInProgress: (inProgress) => set({ actionInProgress: inProgress }),
+  pushUndoEntry: (entry) =>
+    set((state) => {
+      const nextStack = [...state.undoStack, entry]
+      return {
+        undoStack:
+          nextStack.length > MAX_UNDO_STACK_SIZE
+            ? nextStack.slice(nextStack.length - MAX_UNDO_STACK_SIZE)
+            : nextStack,
+      }
+    }),
+  popUndoEntry: () => {
+    const stack = get().undoStack
+    if (stack.length === 0) {
+      return null
+    }
+    const entry = stack[stack.length - 1]
+    set({ undoStack: stack.slice(0, -1) })
+    return entry
+  },
+  clearUndoStack: () => set({ undoStack: [] }),
 }))
 
 // Selector hooks for performance
@@ -138,3 +174,4 @@ export const useError = () => useExplorerStore((s) => s.error)
 export const useOperationInProgress = () => useExplorerStore((s) => s.operationInProgress)
 export const useOperationStatus = () => useExplorerStore((s) => s.operationStatus)
 export const useActionInProgress = () => useExplorerStore((s) => s.actionInProgress)
+export const useUndoStack = () => useExplorerStore((s) => s.undoStack)

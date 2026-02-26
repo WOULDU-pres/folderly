@@ -4,12 +4,19 @@ type SortableItem = {
   id: string
   name: string
   modifiedAt: number
+  size?: number
 }
 
 function sortByMode<T extends SortableItem>(items: T[], mode: SortMode): T[] {
   const copied = [...items]
   if (mode === 'name') {
     return copied.sort((a, b) => a.name.localeCompare(b.name))
+  }
+  if (mode === 'size') {
+    return copied.sort((a, b) => {
+      const sizeDiff = (b.size ?? -1) - (a.size ?? -1)
+      return sizeDiff !== 0 ? sizeDiff : a.name.localeCompare(b.name)
+    })
   }
   return copied.sort((a, b) => b.modifiedAt - a.modifiedAt)
 }

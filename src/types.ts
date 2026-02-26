@@ -1,4 +1,4 @@
-export type SortMode = 'name' | 'modifiedAt'
+export type SortMode = 'name' | 'modifiedAt' | 'size'
 export type ViewMode = 'gallery' | 'list'
 export type OrderMode = 'auto' | 'manual'
 

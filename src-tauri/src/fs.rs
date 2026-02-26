@@ -1,4 +1,5 @@
 use crate::models::{DriveItem, FileItem, FolderItem};
+use serde::Serialize;
 use std::{
     ffi::OsStr,
     fs::{self, DirEntry, Metadata},
@@ -7,6 +8,31 @@ use std::{
     process::Command,
     time::{SystemTime, UNIX_EPOCH},
 };
+
+const DEFAULT_DIRECTORY_PAGE_SIZE: usize = 200;
+const MAX_DIRECTORY_PAGE_SIZE: usize = 2_000;
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FolderPage {
+    pub items: Vec<FolderItem>,
+    pub offset: usize,
+    pub limit: usize,
+    pub total: usize,
+    pub next_offset: Option<usize>,
+    pub has_more: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FilePage {
+    pub items: Vec<FileItem>,
+    pub offset: usize,
+    pub limit: usize,
+    pub total: usize,
+    pub next_offset: Option<usize>,
+    pub has_more: bool,
+}
 
 #[tauri::command]
 pub fn get_default_root_path() -> Result<String, String> {
@@ -53,14 +79,14 @@ pub fn get_parent_path(path: String) -> Result<String, String> {
     let current = normalize_existing_directory(&path)?;
 
     if is_drive_root(&current) {
-        return Ok(current.display().to_string());
+        return Ok(display_path(&current));
     }
 
     if let Some(parent) = current.parent() {
-        return Ok(parent.display().to_string());
+        return Ok(display_path(parent));
     }
 
-    Ok(current.display().to_string())
+    Ok(display_path(&current))
 }
 
 #[tauri::command]
@@ -114,6 +140,46 @@ pub fn list_files(parent_path: String) -> Result<Vec<FileItem>, String> {
 }
 
 #[tauri::command]
+pub fn list_folders_paginated(
+    parent_path: String,
+    offset: Option<usize>,
+    limit: Option<usize>,
+) -> Result<FolderPage, String> {
+    let (offset, limit) = normalize_page_options(offset, limit)?;
+    let folders = list_folders(parent_path)?;
+    let (items, total, next_offset, has_more) = paginate_items(folders, offset, limit);
+
+    Ok(FolderPage {
+        items,
+        offset,
+        limit,
+        total,
+        next_offset,
+        has_more,
+    })
+}
+
+#[tauri::command]
+pub fn list_files_paginated(
+    parent_path: String,
+    offset: Option<usize>,
+    limit: Option<usize>,
+) -> Result<FilePage, String> {
+    let (offset, limit) = normalize_page_options(offset, limit)?;
+    let files = list_files(parent_path)?;
+    let (items, total, next_offset, has_more) = paginate_items(files, offset, limit);
+
+    Ok(FilePage {
+        items,
+        offset,
+        limit,
+        total,
+        next_offset,
+        has_more,
+    })
+}
+
+#[tauri::command]
 pub fn copy_paths(paths: Vec<String>, destination_dir: String) -> Result<Vec<String>, String> {
     if paths.is_empty() {
         return Err("paths must not be empty".to_string());
@@ -126,11 +192,11 @@ pub fn copy_paths(paths: Vec<String>, destination_dir: String) -> Result<Vec<Str
         let source = normalize_existing_path(&raw_source)?;
         let file_name = source
             .file_name()
-            .ok_or_else(|| format!("path has no terminal name: {}", source.display()))?
+            .ok_or_else(|| format!("path has no terminal name: {}", display_path(&source)))?
             .to_os_string();
         let destination = unique_destination_path(&destination_root, &file_name);
         copy_path_recursive(&source, &destination)?;
-        copied_paths.push(destination.display().to_string());
+        copied_paths.push(display_path(&destination));
     }
 
     Ok(copied_paths)
@@ -149,15 +215,15 @@ pub fn move_paths(paths: Vec<String>, destination_dir: String) -> Result<Vec<Str
         let source = normalize_existing_path(&raw_source)?;
         let file_name = source
             .file_name()
-            .ok_or_else(|| format!("path has no terminal name: {}", source.display()))?
+            .ok_or_else(|| format!("path has no terminal name: {}", display_path(&source)))?
             .to_os_string();
         let destination = unique_destination_path(&destination_root, &file_name);
 
         if destination.starts_with(&source) {
             return Err(format!(
                 "cannot move {} into its own descendant {}",
-                source.display(),
-                destination.display()
+                display_path(&source),
+                display_path(&destination)
             ));
         }
 
@@ -170,13 +236,13 @@ pub fn move_paths(paths: Vec<String>, destination_dir: String) -> Result<Vec<Str
             Err(err) => {
                 return Err(format!(
                     "failed moving {} to {}: {err}",
-                    source.display(),
-                    destination.display()
+                    display_path(&source),
+                    display_path(&destination)
                 ));
             }
         }
 
-        moved_paths.push(destination.display().to_string());
+        moved_paths.push(display_path(&destination));
     }
 
     Ok(moved_paths)
@@ -190,10 +256,74 @@ pub fn delete_paths(paths: Vec<String>) -> Result<(), String> {
 
     for raw_path in paths {
         let path = normalize_existing_path(&raw_path)?;
-        remove_path_recursive(&path)?;
+        trash::delete(&path)
+            .map_err(|err| format!("failed moving {} to trash: {err}", display_path(&path)))?;
     }
 
     Ok(())
+}
+
+#[tauri::command]
+pub fn restore_paths_from_trash(paths: Vec<String>) -> Result<Vec<String>, String> {
+    if paths.is_empty() {
+        return Err("paths must not be empty".to_string());
+    }
+
+    let targets = paths
+        .into_iter()
+        .map(|raw_path| {
+            let sanitized = sanitize_input_path(&raw_path, "path")?;
+            let normalized = if is_wsl() {
+                translate_windows_path_to_wsl(sanitized).unwrap_or_else(|| PathBuf::from(sanitized))
+            } else {
+                PathBuf::from(sanitized)
+            };
+            Ok::<PathBuf, String>(strip_windows_extended_prefix(&normalized))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    #[cfg(any(
+        target_os = "windows",
+        all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android"))
+    ))]
+    {
+        use trash::os_limited;
+
+        let mut trash_items = os_limited::list()
+            .map_err(|err| format!("failed listing trash items: {err}"))?;
+        trash_items.sort_by(|left, right| right.time_deleted.cmp(&left.time_deleted));
+
+        let mut selected = Vec::new();
+        for target in &targets {
+            let target_key = compare_path_key(target);
+            if let Some(index) = trash_items
+                .iter()
+                .position(|item| compare_path_key(&item.original_path()) == target_key)
+            {
+                selected.push(trash_items.remove(index));
+            } else {
+                return Err(format!("path not found in trash: {}", display_path(target)));
+            }
+        }
+
+        let restored_paths = selected
+            .iter()
+            .map(|item| display_path(&item.original_path()))
+            .collect::<Vec<_>>();
+
+        os_limited::restore_all(selected)
+            .map_err(|err| format!("failed restoring trash item: {err}"))?;
+
+        return Ok(restored_paths);
+    }
+
+    #[cfg(not(any(
+        target_os = "windows",
+        all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android"))
+    )))]
+    {
+        Err("restore from trash is unsupported on this platform".to_string())
+    }
 }
 
 #[tauri::command]
@@ -204,31 +334,37 @@ pub fn rename_path(path: String, new_name: String) -> Result<String, String> {
     if trimmed_name.is_empty() {
         return Err("new_name must not be empty".to_string());
     }
+    if trimmed_name.contains('\0') {
+        return Err("new_name contains unsupported null byte".to_string());
+    }
+    if trimmed_name == "." || trimmed_name == ".." {
+        return Err("new_name must not be '.' or '..'".to_string());
+    }
     if trimmed_name.contains('/') || trimmed_name.contains('\\') {
         return Err("new_name must not contain path separators".to_string());
     }
 
     let parent = source
         .parent()
-        .ok_or_else(|| format!("cannot resolve parent path for {}", source.display()))?;
+        .ok_or_else(|| format!("cannot resolve parent path for {}", display_path(&source)))?;
     let destination = parent.join(trimmed_name);
 
     if destination.exists() {
         return Err(format!(
             "destination already exists: {}",
-            destination.display()
+            display_path(&destination)
         ));
     }
 
     fs::rename(&source, &destination).map_err(|err| {
         format!(
             "failed renaming {} to {}: {err}",
-            source.display(),
-            destination.display()
+            display_path(&source),
+            display_path(&destination)
         )
     })?;
 
-    Ok(destination.display().to_string())
+    Ok(display_path(&destination))
 }
 
 #[tauri::command]
@@ -239,19 +375,32 @@ pub fn create_folder(parent_path: String, folder_name: String) -> Result<String,
     if trimmed_name.is_empty() {
         return Err("folder_name must not be empty".to_string());
     }
+    if trimmed_name.contains('\0') {
+        return Err("folder_name contains unsupported null byte".to_string());
+    }
+    if trimmed_name == "." || trimmed_name == ".." {
+        return Err("folder_name must not be '.' or '..'".to_string());
+    }
     if trimmed_name.contains('/') || trimmed_name.contains('\\') {
         return Err("folder_name must not contain path separators".to_string());
     }
 
     let destination = parent.join(trimmed_name);
     if destination.exists() {
-        return Err(format!("folder already exists: {}", destination.display()));
+        return Err(format!(
+            "folder already exists: {}",
+            display_path(&destination)
+        ));
     }
 
-    fs::create_dir_all(&destination)
-        .map_err(|err| format!("failed creating folder {}: {err}", destination.display()))?;
+    fs::create_dir_all(&destination).map_err(|err| {
+        format!(
+            "failed creating folder {}: {err}",
+            display_path(&destination)
+        )
+    })?;
 
-    Ok(destination.display().to_string())
+    Ok(display_path(&destination))
 }
 
 #[tauri::command]
@@ -266,7 +415,7 @@ pub fn open_path_in_system(path: String) -> Result<(), String> {
             .arg("")
             .arg(normalized.as_os_str())
             .spawn()
-            .map_err(|err| format!("failed opening path {}: {err}", normalized.display()))?;
+            .map_err(|err| format!("failed opening path {}: {err}", display_path(&normalized)))?;
         return Ok(());
     }
 
@@ -275,7 +424,7 @@ pub fn open_path_in_system(path: String) -> Result<(), String> {
         Command::new("open")
             .arg(normalized.as_os_str())
             .spawn()
-            .map_err(|err| format!("failed opening path {}: {err}", normalized.display()))?;
+            .map_err(|err| format!("failed opening path {}: {err}", display_path(&normalized)))?;
         return Ok(());
     }
 
@@ -284,7 +433,7 @@ pub fn open_path_in_system(path: String) -> Result<(), String> {
         Command::new("xdg-open")
             .arg(normalized.as_os_str())
             .spawn()
-            .map_err(|err| format!("failed opening path {}: {err}", normalized.display()))?;
+            .map_err(|err| format!("failed opening path {}: {err}", display_path(&normalized)))?;
         return Ok(());
     }
 
@@ -353,65 +502,167 @@ fn is_single_letter_drive(name: &str) -> bool {
 }
 
 fn is_drive_root(path: &Path) -> bool {
+    let sanitized = strip_windows_extended_prefix(path);
+
     if cfg!(target_os = "windows") {
-        let text = path.display().to_string();
+        let text = sanitized.display().to_string();
         let chars: Vec<char> = text.chars().collect();
-        if chars.len() == 3 && chars[0].is_ascii_alphabetic() && chars[1] == ':' && (chars[2] == '\\' || chars[2] == '/') {
+        if chars.len() == 3
+            && chars[0].is_ascii_alphabetic()
+            && chars[1] == ':'
+            && (chars[2] == '\\' || chars[2] == '/')
+        {
             return true;
         }
     }
 
     if is_wsl() {
-        let normalized = path.display().to_string();
-        let parts = normalized.split('/').filter(|part| !part.is_empty()).collect::<Vec<_>>();
+        let normalized = sanitized.display().to_string();
+        let parts = normalized
+            .split('/')
+            .filter(|part| !part.is_empty())
+            .collect::<Vec<_>>();
         return parts.len() == 2 && parts[0] == "mnt" && is_single_letter_drive(parts[1]);
     }
 
     false
 }
 
-fn normalize_existing_directory(parent_path: &str) -> Result<PathBuf, String> {
-    let trimmed = parent_path.trim();
+fn sanitize_input_path<'a>(raw_path: &'a str, field_name: &str) -> Result<&'a str, String> {
+    let trimmed = raw_path.trim();
     if trimmed.is_empty() {
-        return Err("parent_path must not be empty".to_string());
+        return Err(format!("{field_name} must not be empty"));
+    }
+    if trimmed.contains('\0') {
+        return Err(format!("{field_name} contains unsupported null byte"));
+    }
+    Ok(trimmed)
+}
+
+fn to_io_path(path: &Path) -> PathBuf {
+    #[cfg(target_os = "windows")]
+    {
+        return with_windows_extended_prefix(path);
     }
 
-    let direct = PathBuf::from(trimmed);
+    #[cfg(not(target_os = "windows"))]
+    {
+        path.to_path_buf()
+    }
+}
+
+fn strip_windows_extended_prefix(path: &Path) -> PathBuf {
+    #[cfg(target_os = "windows")]
+    {
+        let value = path.to_string_lossy();
+        if let Some(rest) = value.strip_prefix(r"\\?\UNC\") {
+            return PathBuf::from(format!(r"\\{rest}"));
+        }
+        if let Some(rest) = value.strip_prefix(r"\\?\") {
+            return PathBuf::from(rest);
+        }
+    }
+
+    path.to_path_buf()
+}
+
+fn display_path(path: &Path) -> String {
+    strip_windows_extended_prefix(path).display().to_string()
+}
+
+fn compare_path_key(path: &Path) -> String {
+    let display = display_path(path);
+    let normalized = display.replace('\\', "/");
+    if cfg!(target_os = "windows") {
+        normalized.to_ascii_lowercase()
+    } else {
+        normalized
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn with_windows_extended_prefix(path: &Path) -> PathBuf {
+    const LONG_PATH_THRESHOLD: usize = 240;
+
+    let as_string = path.to_string_lossy();
+
+    if as_string.len() < LONG_PATH_THRESHOLD
+        || as_string.starts_with(r"\\?\")
+        || as_string.starts_with(r"\\.\")
+    {
+        return path.to_path_buf();
+    }
+
+    let normalized = as_string.replace('/', r"\");
+
+    if let Some(stripped_unc) = normalized.strip_prefix(r"\\") {
+        return PathBuf::from(format!(r"\\?\UNC\{stripped_unc}"));
+    }
+
+    let mut chars = normalized.chars();
+    let drive = chars.next();
+    let colon = chars.next();
+
+    if matches!(drive, Some(value) if value.is_ascii_alphabetic()) && colon == Some(':') {
+        return PathBuf::from(format!(r"\\?\{normalized}"));
+    }
+
+    path.to_path_buf()
+}
+
+fn normalize_existing_directory(parent_path: &str) -> Result<PathBuf, String> {
+    let trimmed = sanitize_input_path(parent_path, "parent_path")?;
+    let normalized_input = strip_windows_verbatim_prefix(trimmed);
+    let direct = PathBuf::from(&normalized_input);
     if direct.exists() && direct.is_dir() {
-        return Ok(direct);
+        return Ok(to_io_path(&direct));
     }
 
     if is_wsl() {
-        if let Some(mapped) = translate_windows_path_to_wsl(trimmed) {
+        if let Some(mapped) = translate_windows_path_to_wsl(&normalized_input) {
             if mapped.exists() && mapped.is_dir() {
-                return Ok(mapped);
+                return Ok(to_io_path(&mapped));
             }
         }
     }
 
-    Err(format!("directory does not exist: {trimmed}"))
+    Err(format!("directory does not exist: {normalized_input}"))
 }
 
 fn normalize_existing_path(raw_path: &str) -> Result<PathBuf, String> {
-    let trimmed = raw_path.trim();
-    if trimmed.is_empty() {
-        return Err("path must not be empty".to_string());
-    }
-
-    let direct = PathBuf::from(trimmed);
+    let trimmed = sanitize_input_path(raw_path, "path")?;
+    let normalized_input = strip_windows_verbatim_prefix(trimmed);
+    let direct = PathBuf::from(&normalized_input);
     if direct.exists() {
-        return Ok(direct);
+        return Ok(to_io_path(&direct));
     }
 
     if is_wsl() {
-        if let Some(mapped) = translate_windows_path_to_wsl(trimmed) {
+        if let Some(mapped) = translate_windows_path_to_wsl(&normalized_input) {
             if mapped.exists() {
-                return Ok(mapped);
+                return Ok(to_io_path(&mapped));
             }
         }
     }
 
-    Err(format!("path does not exist: {trimmed}"))
+    Err(format!("path does not exist: {normalized_input}"))
+}
+
+fn strip_windows_verbatim_prefix(path: &str) -> String {
+    if let Some(rest) = path.strip_prefix(r"\\?\UNC\") {
+        return format!(r"\\{rest}");
+    }
+    if let Some(rest) = path.strip_prefix(r"\\?\") {
+        return rest.to_string();
+    }
+    if let Some(rest) = path.strip_prefix("//?/UNC/") {
+        return format!("//{rest}");
+    }
+    if let Some(rest) = path.strip_prefix("//?/") {
+        return rest.to_string();
+    }
+
+    path.to_string()
 }
 
 fn unique_destination_path(destination_root: &Path, source_name: &OsStr) -> PathBuf {
@@ -456,8 +707,8 @@ fn copy_single_file_with_retry(source: &Path, destination: &Path) -> Result<(), 
             Err(err) => {
                 last_err = format!(
                     "failed copying file {} -> {}: {err}",
-                    source.display(),
-                    destination.display()
+                    display_path(source),
+                    display_path(destination)
                 );
                 let is_transient = matches!(
                     err.kind(),
@@ -489,18 +740,19 @@ fn copy_path_recursive(source: &Path, destination: &Path) -> Result<(), String> 
     }
 
     if !source.is_dir() {
-        return Err(format!("unsupported path type: {}", source.display()));
+        return Err(format!("unsupported path type: {}", display_path(source)));
     }
 
     // Iterative breadth-first copy using a stack to avoid stack overflow on deep trees
-    let mut stack: Vec<(PathBuf, PathBuf)> = vec![(source.to_path_buf(), destination.to_path_buf())];
+    let mut stack: Vec<(PathBuf, PathBuf)> =
+        vec![(source.to_path_buf(), destination.to_path_buf())];
     let mut errors: Vec<String> = Vec::new();
 
     while let Some((src_dir, dst_dir)) = stack.pop() {
         fs::create_dir_all(&dst_dir).map_err(|err| {
             format!(
                 "failed creating destination directory {}: {err}",
-                dst_dir.display()
+                display_path(&dst_dir)
             )
         })?;
 
@@ -509,7 +761,7 @@ fn copy_path_recursive(source: &Path, destination: &Path) -> Result<(), String> 
             Err(err) => {
                 errors.push(format!(
                     "failed reading directory {}: {err}",
-                    src_dir.display()
+                    display_path(&src_dir)
                 ));
                 continue;
             }
@@ -521,7 +773,7 @@ fn copy_path_recursive(source: &Path, destination: &Path) -> Result<(), String> 
                 Err(err) => {
                     errors.push(format!(
                         "failed reading entry in {}: {err}",
-                        src_dir.display()
+                        display_path(&src_dir)
                     ));
                     continue;
                 }
@@ -560,21 +812,21 @@ fn copy_path_recursive(source: &Path, destination: &Path) -> Result<(), String> 
 fn remove_path_recursive(path: &Path) -> Result<(), String> {
     if path.is_dir() {
         fs::remove_dir_all(path)
-            .map_err(|err| format!("failed deleting directory {}: {err}", path.display()))?;
+            .map_err(|err| format!("failed deleting directory {}: {err}", display_path(path)))?;
         return Ok(());
     }
 
     if path.is_file() {
         fs::remove_file(path)
-            .map_err(|err| format!("failed deleting file {}: {err}", path.display()))?;
+            .map_err(|err| format!("failed deleting file {}: {err}", display_path(path)))?;
         return Ok(());
     }
 
-    Err(format!("unsupported path type: {}", path.display()))
+    Err(format!("unsupported path type: {}", display_path(path)))
 }
 
 fn translate_windows_path_to_wsl(path: &str) -> Option<PathBuf> {
-    let normalized = path.replace('\\', "/");
+    let normalized = strip_windows_verbatim_prefix(path).replace('\\', "/");
     let mut chars = normalized.chars();
 
     let drive = chars.next()?;
@@ -622,7 +874,12 @@ pub fn get_quick_access_paths() -> Result<Vec<DriveItem>, String> {
             if let Ok(entries) = std::fs::read_dir(&users_dir) {
                 for entry in entries.flatten() {
                     let name = entry.file_name().to_string_lossy().to_string();
-                    if name == "Public" || name == "Default" || name == "Default User" || name == "All Users" || name.starts_with('.') {
+                    if name == "Public"
+                        || name == "Default"
+                        || name == "Default User"
+                        || name == "All Users"
+                        || name.starts_with('.')
+                    {
                         continue;
                     }
                     let user_dir = entry.path();
@@ -684,14 +941,14 @@ fn is_wsl() -> bool {
 
 fn read_dir_entries(root: &Path) -> Result<Vec<DirEntry>, String> {
     let entries = fs::read_dir(root)
-        .map_err(|err| format!("failed reading directory {}: {err}", root.display()))?;
+        .map_err(|err| format!("failed reading directory {}: {err}", display_path(root)))?;
 
     let mut collected = Vec::new();
     for entry in entries {
         let entry = entry.map_err(|err| {
             format!(
                 "failed reading entry in directory {}: {err}",
-                root.display()
+                display_path(root)
             )
         })?;
         collected.push(entry);
@@ -700,9 +957,44 @@ fn read_dir_entries(root: &Path) -> Result<Vec<DirEntry>, String> {
     Ok(collected)
 }
 
+fn normalize_page_options(
+    offset: Option<usize>,
+    limit: Option<usize>,
+) -> Result<(usize, usize), String> {
+    let offset = offset.unwrap_or(0);
+    let requested_limit = limit.unwrap_or(DEFAULT_DIRECTORY_PAGE_SIZE);
+    if requested_limit == 0 {
+        return Err("limit must be greater than 0".to_string());
+    }
+    let limit = requested_limit.min(MAX_DIRECTORY_PAGE_SIZE);
+    Ok((offset, limit))
+}
+
+fn paginate_items<T>(
+    items: Vec<T>,
+    offset: usize,
+    limit: usize,
+) -> (Vec<T>, usize, Option<usize>, bool) {
+    let total = items.len();
+    if offset >= total {
+        return (Vec::new(), total, None, false);
+    }
+
+    let end = offset.saturating_add(limit).min(total);
+    let has_more = end < total;
+    let page = items
+        .into_iter()
+        .skip(offset)
+        .take(limit)
+        .collect::<Vec<_>>();
+    let next_offset = has_more.then_some(end);
+
+    (page, total, next_offset, has_more)
+}
+
 fn build_folder_metadata(entry: DirEntry, metadata: Metadata) -> FolderItem {
     let path = entry.path();
-    let path_string = path.display().to_string();
+    let path_string = display_path(&path);
 
     FolderItem {
         id: path_string.clone(),
@@ -715,7 +1007,7 @@ fn build_folder_metadata(entry: DirEntry, metadata: Metadata) -> FolderItem {
 
 fn build_file_metadata(entry: DirEntry, metadata: Metadata) -> FileItem {
     let path = entry.path();
-    let path_string = path.display().to_string();
+    let path_string = display_path(&path);
 
     FileItem {
         id: path_string.clone(),
@@ -760,7 +1052,8 @@ fn system_time_to_epoch_seconds(time: SystemTime) -> Option<i64> {
 #[tauri::command]
 pub fn read_file_bytes(path: String) -> Result<Vec<u8>, String> {
     let normalized = normalize_existing_path(&path)?;
-    fs::read(&normalized).map_err(|e| format!("Failed to read file: {e}"))
+    fs::read(&normalized)
+        .map_err(|e| format!("Failed to read file {}: {e}", display_path(&normalized)))
 }
 
 #[cfg(test)]
@@ -811,7 +1104,10 @@ mod tests {
         fs::write(root.join("notes.txt"), "hello").expect("create file");
 
         let folders = list_folders(root.display().to_string()).expect("list folders");
-        let names = folders.iter().map(|folder| folder.name.as_str()).collect::<Vec<_>>();
+        let names = folders
+            .iter()
+            .map(|folder| folder.name.as_str())
+            .collect::<Vec<_>>();
 
         assert_eq!(names, vec!["alpha", "beta", "Zoo"]);
         assert!(folders.iter().all(|folder| !folder.id.is_empty()));
@@ -829,7 +1125,10 @@ mod tests {
 
         let files = list_files(root.display().to_string()).expect("list files");
 
-        let names = files.iter().map(|file| file.name.as_str()).collect::<Vec<_>>();
+        let names = files
+            .iter()
+            .map(|file| file.name.as_str())
+            .collect::<Vec<_>>();
         assert_eq!(names, vec!["photo.JPG", "README", "report.pdf"]);
 
         let photo = files
@@ -847,6 +1146,97 @@ mod tests {
     }
 
     #[test]
+    fn list_files_supports_unicode_and_special_character_names_basic() {
+        let temp_dir = TempDirGuard::new("list-files-special-chars");
+        let root = temp_dir.path();
+
+        let names = [
+            "한글 문서.pdf",
+            "space name.txt",
+            "A&B #1(초안).md",
+            "emoji-📄.csv",
+        ];
+
+        for name in names {
+            fs::write(root.join(name), "sample").expect("create fixture file");
+        }
+
+        let files = list_files(root.display().to_string()).expect("list files");
+
+        for expected in names {
+            assert!(
+                files.iter().any(|entry| entry.name == expected),
+                "missing file entry for {expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn list_folders_paginated_returns_slice_and_metadata() {
+        let temp_dir = TempDirGuard::new("list-folders-paginated");
+        let root = temp_dir.path();
+
+        fs::create_dir_all(root.join("alpha")).expect("create alpha");
+        fs::create_dir_all(root.join("beta")).expect("create beta");
+        fs::create_dir_all(root.join("gamma")).expect("create gamma");
+        fs::create_dir_all(root.join("zeta")).expect("create zeta");
+        fs::write(root.join("notes.txt"), "hello").expect("create file");
+
+        let page = list_folders_paginated(root.display().to_string(), Some(1), Some(2))
+            .expect("list page");
+        let names = page
+            .items
+            .iter()
+            .map(|folder| folder.name.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(names, vec!["beta", "gamma"]);
+        assert_eq!(page.offset, 1);
+        assert_eq!(page.limit, 2);
+        assert_eq!(page.total, 4);
+        assert_eq!(page.next_offset, Some(3));
+        assert!(page.has_more);
+    }
+
+    #[test]
+    fn list_files_paginated_rejects_zero_limit() {
+        let temp_dir = TempDirGuard::new("list-files-paginated-invalid");
+        let root = temp_dir.path();
+        fs::write(root.join("one.txt"), "1").expect("create file");
+
+        let err = list_files_paginated(root.display().to_string(), Some(0), Some(0))
+            .expect_err("zero limit should fail");
+        assert!(err.contains("limit must be greater than 0"));
+    }
+
+    #[test]
+    fn list_files_paginated_clamps_limit_and_handles_offset_bounds() {
+        let temp_dir = TempDirGuard::new("list-files-paginated");
+        let root = temp_dir.path();
+        fs::write(root.join("a.txt"), "1").expect("create a");
+        fs::write(root.join("b.txt"), "2").expect("create b");
+
+        let first = list_files_paginated(
+            root.display().to_string(),
+            Some(0),
+            Some(MAX_DIRECTORY_PAGE_SIZE + 500),
+        )
+        .expect("first page");
+        assert_eq!(first.limit, MAX_DIRECTORY_PAGE_SIZE);
+        assert_eq!(first.total, 2);
+        assert_eq!(first.items.len(), 2);
+        assert!(!first.has_more);
+        assert_eq!(first.next_offset, None);
+
+        let second = list_files_paginated(root.display().to_string(), Some(10), Some(10))
+            .expect("second page");
+        assert_eq!(second.items.len(), 0);
+        assert_eq!(second.total, 2);
+        assert_eq!(second.next_offset, None);
+        assert!(!second.has_more);
+    }
+
+    #[test]
     fn list_folders_rejects_non_directory_input() {
         let temp_dir = TempDirGuard::new("validation");
         let file_path = temp_dir.path().join("single-file.txt");
@@ -860,6 +1250,39 @@ mod tests {
     fn list_files_rejects_empty_parent_path() {
         let err = list_files("   ".to_string()).expect_err("must reject blank input");
         assert!(err.contains("parent_path"));
+    }
+
+    #[test]
+    fn list_files_supports_unicode_and_special_character_names() {
+        let temp_dir = TempDirGuard::new("unicode-special");
+        let root = temp_dir.path();
+        let names = [
+            "한글 파일.pdf",
+            "emoji😀(샘플).txt",
+            "space & hash #1.md",
+            "alpha.txt",
+        ];
+
+        for name in names {
+            fs::write(root.join(name), "sample").expect("create unicode/special file");
+        }
+
+        let files = list_files(root.display().to_string()).expect("list files");
+        let listed_names = files
+            .iter()
+            .map(|item| item.name.clone())
+            .collect::<Vec<_>>();
+
+        assert!(listed_names.iter().any(|name| name == "한글 파일.pdf"));
+        assert!(listed_names.iter().any(|name| name == "emoji😀(샘플).txt"));
+        assert!(listed_names.iter().any(|name| name == "space & hash #1.md"));
+    }
+
+    #[test]
+    fn normalize_existing_path_rejects_null_bytes() {
+        let err =
+            normalize_existing_path("C:\\temp\0bad").expect_err("null byte path must be rejected");
+        assert!(err.contains("null byte"));
     }
 
     #[test]
@@ -921,6 +1344,25 @@ mod tests {
     }
 
     #[test]
+    fn rename_path_supports_unicode_and_special_characters() {
+        let temp_dir = TempDirGuard::new("rename-special");
+        let source_file = temp_dir.path().join("before.txt");
+        fs::write(&source_file, "rename-content").expect("write source file");
+
+        let target_name = "한글 #샘플 (v1).txt";
+        let renamed = rename_path(source_file.display().to_string(), target_name.to_string())
+            .expect("rename with unicode/special chars");
+        let renamed_path = PathBuf::from(&renamed);
+
+        assert!(!source_file.exists());
+        assert!(renamed_path.exists());
+        assert_eq!(
+            renamed_path.file_name().and_then(|v| v.to_str()),
+            Some(target_name)
+        );
+    }
+
+    #[test]
     fn create_folder_creates_directory_under_parent_path() {
         let temp_dir = TempDirGuard::new("create-folder");
         let created = create_folder(
@@ -935,7 +1377,39 @@ mod tests {
     }
 
     #[test]
-    fn delete_paths_removes_file() {
+    fn create_folder_rejects_dot_dot_and_null_byte() {
+        let temp_dir = TempDirGuard::new("create-folder-invalid");
+        let parent = temp_dir.path().display().to_string();
+
+        let dot_err = create_folder(parent.clone(), ".".to_string()).expect_err("dot must fail");
+        assert!(dot_err.contains("must not be '.' or '..'"));
+
+        let dotdot_err =
+            create_folder(parent.clone(), "..".to_string()).expect_err("dotdot must fail");
+        assert!(dotdot_err.contains("must not be '.' or '..'"));
+
+        let null_err =
+            create_folder(parent, "bad\0name".to_string()).expect_err("null byte must fail");
+        assert!(null_err.contains("null byte"));
+    }
+
+    #[test]
+    fn delete_paths_rejects_empty_paths() {
+        let err = delete_paths(Vec::new()).expect_err("must reject empty paths");
+        assert!(err.contains("paths must not be empty"));
+    }
+
+    #[test]
+    fn delete_paths_rejects_nonexistent_path() {
+        let temp_dir = TempDirGuard::new("delete-missing");
+        let missing = temp_dir.path().join("missing-file.txt");
+        let err = delete_paths(vec![missing.display().to_string()])
+            .expect_err("must reject missing path");
+        assert!(err.contains("path does not exist"));
+    }
+
+    #[test]
+    fn delete_paths_moves_file_to_trash() {
         let temp_dir = TempDirGuard::new("delete-file");
         let target_file = temp_dir.path().join("trash.txt");
         fs::write(&target_file, "trash-content").expect("write file");
@@ -945,12 +1419,83 @@ mod tests {
     }
 
     #[test]
+    fn delete_paths_moves_directory_to_trash() {
+        let temp_dir = TempDirGuard::new("delete-directory");
+        let target_dir = temp_dir.path().join("nested");
+        let target_file = target_dir.join("sample.txt");
+        fs::create_dir_all(&target_dir).expect("create nested dir");
+        fs::write(&target_file, "sample").expect("write nested file");
+
+        delete_paths(vec![target_dir.display().to_string()]).expect("delete directory path");
+        assert!(!target_dir.exists());
+    }
+
+    #[test]
+    fn restore_paths_from_trash_rejects_empty_paths() {
+        let err = restore_paths_from_trash(Vec::new()).expect_err("must reject empty paths");
+        assert!(err.contains("paths must not be empty"));
+    }
+
+    #[cfg(any(
+        target_os = "windows",
+        all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android"))
+    ))]
+    #[test]
+    fn restore_paths_from_trash_restores_deleted_file() {
+        let temp_dir = TempDirGuard::new("restore-trash-file");
+        let target_file = temp_dir.path().join("restore-me.txt");
+        fs::write(&target_file, "restore-content").expect("write file");
+
+        let original_path = target_file.display().to_string();
+        delete_paths(vec![original_path.clone()]).expect("delete path");
+        assert!(!target_file.exists());
+
+        let restored = restore_paths_from_trash(vec![original_path.clone()])
+            .expect("restore from trash");
+        assert_eq!(restored, vec![original_path]);
+        assert!(target_file.exists());
+    }
+
+    #[test]
     fn translate_windows_path_to_wsl_works_for_drive_root_and_nested_paths() {
         let root = translate_windows_path_to_wsl("C:\\").expect("root conversion");
         assert_eq!(root, PathBuf::from("/mnt/c"));
 
-        let nested = translate_windows_path_to_wsl("D:\\Users\\Alice\\Documents").expect("nested conversion");
+        let nested = translate_windows_path_to_wsl("D:\\Users\\Alice\\Documents")
+            .expect("nested conversion");
         assert_eq!(nested, PathBuf::from("/mnt/d/Users/Alice/Documents"));
+    }
+
+    #[test]
+    fn translate_windows_path_to_wsl_supports_verbatim_and_special_chars() {
+        let prefixed = translate_windows_path_to_wsl(r"\\?\C:\Users\테스트\emoji😀\A & B #1.pdf")
+            .expect("verbatim conversion");
+        assert_eq!(
+            prefixed,
+            PathBuf::from("/mnt/c/Users/테스트/emoji😀/A & B #1.pdf")
+        );
+    }
+
+    #[test]
+    fn strip_windows_verbatim_prefix_handles_drive_and_unc_prefixes() {
+        assert_eq!(
+            strip_windows_verbatim_prefix(r"\\?\C:\nested\path"),
+            r"C:\nested\path"
+        );
+        assert_eq!(
+            strip_windows_verbatim_prefix(r"\\?\UNC\server\share\nested"),
+            r"\\server\share\nested"
+        );
+    }
+
+    #[test]
+    fn translate_windows_path_to_wsl_accepts_verbatim_prefix() {
+        let nested = translate_windows_path_to_wsl(r"\\?\C:\Users\한글\A&B #1(초안)\emoji-📄.txt")
+            .expect("verbatim path conversion");
+        assert_eq!(
+            nested,
+            PathBuf::from("/mnt/c/Users/한글/A&B #1(초안)/emoji-📄.txt")
+        );
     }
 
     #[test]
@@ -973,7 +1518,9 @@ mod tests {
     fn list_drives_includes_c_on_wsl_when_available() {
         if is_wsl() && Path::new("/mnt/c").exists() {
             let drives = list_drives().expect("list drives");
-            assert!(drives.iter().any(|drive| drive.label.eq_ignore_ascii_case("C:")));
+            assert!(drives
+                .iter()
+                .any(|drive| drive.label.eq_ignore_ascii_case("C:")));
         }
     }
 }

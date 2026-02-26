@@ -21,6 +21,7 @@ chrono = { version = "0.4", default-features = false, features = ["clock"] }
 rusqlite = { version = "0.31", features = ["bundled"] }
 lopdf = "0.38"
 dirs = "5"
+trash = "5"
 
 [features]
 default = ["custom-protocol"]

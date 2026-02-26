@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type DragEvent as ReactDragEvent } from 'react'
+import { useEffect, useMemo, useRef, useState, type DragEvent as ReactDragEvent, type RefObject } from 'react'
 import { convertFileSrc, invoke } from '@tauri-apps/api/core'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import {
@@ -47,16 +47,19 @@ import { ContextMenu, type ContextMenuItem } from './components/ContextMenu'
 import { BookmarkItem, DriveItem, FileItem, FolderItem, OrderMode, SortMode } from './types'
 import { mergeManualOrder, sortFiles, sortFolders } from './utils/folderOrder'
 import { extLabel, formatBytes, formatDate } from './utils/format'
-import { useExplorerStore, type ExplorerEntry } from './store/useExplorerStore'
+import { encodeFileSrcUrl, getFileDirectory } from './utils/path'
+import { useExplorerStore, type ExplorerEntry, type UndoEntry } from './store/useExplorerStore'
 
 const BOOKMARK_STORAGE_KEY = 'explorer.bookmarks.v1'
 const ENTRY_DRAG_MIME = 'application/x-windows-explorer-paths'
+const FOLDER_PAGE_SIZE = 300
+const ENTRY_PAGE_SIZE = 300
 
 type SortableFolderRowProps = {
   folder: FolderItem
   selected: boolean
   manualMode: boolean
-  onClick: (folder: FolderItem) => void
+  onClick: (folder: FolderItem, modifiers: SidebarSelectModifiers) => void
   onDoubleClick: (folder: FolderItem) => void
   onDropEntries: (paths: string[], destinationPath: string, copyMode: boolean) => void
 }
@@ -110,13 +113,13 @@ function SortableFolderRow({
       role="option"
       aria-selected={selected}
       tabIndex={0}
-      onClick={() => onClick(folder)}
+      onClick={(event) => onClick(folder, { ctrl: event.ctrlKey || event.metaKey })}
       onDoubleClick={() => onDoubleClick(folder)}
       onKeyDown={(e) => {
         if (e.key === 'Enter' || e.key === ' ') {
           e.preventDefault()
           if (e.key === 'Enter') onDoubleClick(folder)
-          else onClick(folder)
+          else onClick(folder, { ctrl: e.ctrlKey || e.metaKey })
         }
       }}
       onDragOver={(event) => event.preventDefault()}
@@ -144,6 +147,7 @@ function SortableFolderRow({
 }
 
 type SelectModifiers = { ctrl: boolean; shift: boolean }
+type SidebarSelectModifiers = Pick<SelectModifiers, 'ctrl'>
 
 type SortableEntryRowProps = {
   entry: ExplorerEntry
@@ -151,13 +155,37 @@ type SortableEntryRowProps = {
   manualMode: boolean
   dragPaths: string[]
   isCut: boolean
+  isInlineRenaming: boolean
+  inlineRenameValue: string
+  inlineRenameInputRef: RefObject<HTMLInputElement | null>
   onSelect: (entry: ExplorerEntry, modifiers: SelectModifiers) => void
   onOpen: (entry: ExplorerEntry) => void
   onDropEntries: (paths: string[], destinationPath: string, copyMode: boolean) => void
+  onStartInlineRename: (entry: ExplorerEntry) => void
+  onInlineRenameChange: (value: string) => void
+  onInlineRenameCommit: () => void
+  onInlineRenameCancel: () => void
   onContextMenu?: (e: React.MouseEvent, entry: ExplorerEntry) => void
 }
 
-function SortableEntryRow({ entry, selected, manualMode, dragPaths, isCut, onSelect, onOpen, onDropEntries, onContextMenu }: SortableEntryRowProps) {
+function SortableEntryRow({
+  entry,
+  selected,
+  manualMode,
+  dragPaths,
+  isCut,
+  isInlineRenaming,
+  inlineRenameValue,
+  inlineRenameInputRef,
+  onSelect,
+  onOpen,
+  onDropEntries,
+  onStartInlineRename,
+  onInlineRenameChange,
+  onInlineRenameCommit,
+  onInlineRenameCancel,
+  onContextMenu,
+}: SortableEntryRowProps) {
   const { attributes, listeners, setNodeRef, setActivatorNodeRef, transform, transition } = useSortable({
     id: entry.id,
     disabled: !manualMode,
@@ -191,7 +219,11 @@ function SortableEntryRow({ entry, selected, manualMode, dragPaths, isCut, onSel
         onDropEntries(paths, entry.path, event.ctrlKey || event.metaKey)
       }}
       onClick={(e) => onSelect(entry, { ctrl: e.ctrlKey || e.metaKey, shift: e.shiftKey })}
-      onDoubleClick={() => onOpen(entry)}
+      onDoubleClick={() => {
+        if (!isInlineRenaming) {
+          onOpen(entry)
+        }
+      }}
       onContextMenu={(e) => onContextMenu?.(e, entry)}
       onKeyDown={(e) => {
         if (e.key === 'Enter') {
@@ -215,9 +247,44 @@ function SortableEntryRow({ entry, selected, manualMode, dragPaths, isCut, onSel
           <GripVertical size={14} />
         </button>
       </span>
-      <span role="gridcell" className="name-cell">
+      <span
+        role="gridcell"
+        className="name-cell"
+        onDoubleClick={(e) => {
+          e.preventDefault()
+          e.stopPropagation()
+          onStartInlineRename(entry)
+        }}
+      >
         {entry.kind === 'folder' ? <Folder size={16} /> : entry.ext === 'pdf' ? <FileText size={16} /> : <File size={16} />}
-        {entry.name}
+        {isInlineRenaming ? (
+          <input
+            ref={inlineRenameInputRef}
+            className="inline-rename-input"
+            value={inlineRenameValue}
+            onChange={(event) => onInlineRenameChange(event.target.value)}
+            onClick={(event) => event.stopPropagation()}
+            onDoubleClick={(event) => event.stopPropagation()}
+            onMouseDown={(event) => event.stopPropagation()}
+            onBlur={() => void onInlineRenameCommit()}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter') {
+                event.preventDefault()
+                event.stopPropagation()
+                void onInlineRenameCommit()
+              } else if (event.key === 'Escape') {
+                event.preventDefault()
+                event.stopPropagation()
+                onInlineRenameCancel()
+              } else {
+                event.stopPropagation()
+              }
+            }}
+            aria-label={`${entry.name} 이름 편집`}
+          />
+        ) : (
+          <span className="entry-name-label">{entry.name}</span>
+        )}
       </span>
       <span role="gridcell">{entry.kind === 'folder' ? '폴더' : extLabel(entry.ext)}</span>
       <span role="gridcell">{entry.kind === 'folder' ? '-' : formatBytes(entry.size)}</span>
@@ -225,6 +292,171 @@ function SortableEntryRow({ entry, selected, manualMode, dragPaths, isCut, onSel
     </li>
   )
 }
+
+type SortableGalleryCardProps = {
+  entry: ExplorerEntry
+  selected: boolean
+  manualMode: boolean
+  dragPaths: string[]
+  isCut: boolean
+  isInlineRenaming: boolean
+  inlineRenameValue: string
+  inlineRenameInputRef: RefObject<HTMLInputElement | null>
+  onSelect: (entry: ExplorerEntry, modifiers: SelectModifiers) => void
+  onOpen: (entry: ExplorerEntry) => void
+  onDropEntries: (paths: string[], destinationPath: string, copyMode: boolean) => void
+  onStartInlineRename: (entry: ExplorerEntry) => void
+  onInlineRenameChange: (value: string) => void
+  onInlineRenameCommit: () => void
+  onInlineRenameCancel: () => void
+  onContextMenu?: (e: React.MouseEvent, entry: ExplorerEntry) => void
+}
+
+function SortableGalleryCard({
+  entry,
+  selected,
+  manualMode,
+  dragPaths,
+  isCut,
+  isInlineRenaming,
+  inlineRenameValue,
+  inlineRenameInputRef,
+  onSelect,
+  onOpen,
+  onDropEntries,
+  onStartInlineRename,
+  onInlineRenameChange,
+  onInlineRenameCommit,
+  onInlineRenameCancel,
+  onContextMenu,
+}: SortableGalleryCardProps) {
+  const { attributes, listeners, setNodeRef, setActivatorNodeRef, transform, transition } = useSortable({
+    id: entry.id,
+    disabled: !manualMode,
+  })
+
+  const style = {
+    transform: CSS.Transform.toString(transform),
+    transition,
+  }
+
+  return (
+    <div
+      ref={setNodeRef}
+      style={style}
+      className={`gallery-card ${selected ? 'selected' : ''} ${entry.isHidden ? 'hidden-entry' : ''} ${isCut ? 'cut-entry' : ''}`}
+      role="button"
+      aria-selected={selected}
+      tabIndex={0}
+      draggable={!manualMode}
+      onDragStart={(event) => {
+        if (manualMode) return
+        writeDragPayload(event, selected && dragPaths.length > 0 ? dragPaths : [entry.path])
+      }}
+      onDragOver={(event) => {
+        if (manualMode) return
+        if (entry.kind === 'folder') {
+          event.preventDefault()
+        }
+      }}
+      onDrop={(event) => {
+        if (manualMode || entry.kind !== 'folder') return
+        event.preventDefault()
+        const paths = readDragPayload(event)
+        if (!paths.length) return
+        onDropEntries(paths, entry.path, event.ctrlKey || event.metaKey)
+      }}
+      onClick={(e) => onSelect(entry, { ctrl: e.ctrlKey || e.metaKey, shift: e.shiftKey })}
+      onDoubleClick={() => {
+        if (!isInlineRenaming) {
+          onOpen(entry)
+        }
+      }}
+      onContextMenu={(e) => onContextMenu?.(e, entry)}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter') {
+          e.preventDefault()
+          if (!isInlineRenaming) {
+            onOpen(entry)
+          }
+        } else if (e.key === ' ') {
+          e.preventDefault()
+          onSelect(entry, { ctrl: e.ctrlKey || e.metaKey, shift: e.shiftKey })
+        } else if (e.key === 'F2') {
+          e.preventDefault()
+          onStartInlineRename(entry)
+        }
+      }}
+    >
+      {manualMode && (
+        <button
+          ref={setActivatorNodeRef}
+          className="gallery-drag-handle"
+          aria-label={`${entry.name} 순서 조정`}
+          onClick={(event) => event.stopPropagation()}
+          onDoubleClick={(event) => event.stopPropagation()}
+          onMouseDown={(event) => event.stopPropagation()}
+          {...listeners}
+          {...attributes}
+        >
+          <GripVertical size={14} />
+        </button>
+      )}
+      <div className="gallery-thumb">
+        {entry.kind === 'folder' ? (
+          <Folder size={32} />
+        ) : isImage(entry.ext) ? (
+          <img src={toEncodedFileSrc(entry.path)} alt={entry.name} loading="lazy" />
+        ) : entry.ext === 'pdf' ? (
+          <FileText size={32} />
+        ) : (
+          <File size={32} />
+        )}
+      </div>
+      {isInlineRenaming ? (
+        <input
+          ref={inlineRenameInputRef}
+          className="inline-rename-input"
+          value={inlineRenameValue}
+          onChange={(event) => onInlineRenameChange(event.target.value)}
+          onClick={(event) => event.stopPropagation()}
+          onDoubleClick={(event) => event.stopPropagation()}
+          onMouseDown={(event) => event.stopPropagation()}
+          onBlur={() => void onInlineRenameCommit()}
+          onKeyDown={(event) => {
+            if (event.key === 'Enter') {
+              event.preventDefault()
+              event.stopPropagation()
+              void onInlineRenameCommit()
+            } else if (event.key === 'Escape') {
+              event.preventDefault()
+              event.stopPropagation()
+              onInlineRenameCancel()
+            } else {
+              event.stopPropagation()
+            }
+          }}
+          aria-label={`${entry.name} 이름 편집`}
+        />
+      ) : (
+        <strong
+          className="gallery-name"
+          title={entry.name}
+          onDoubleClick={(event) => {
+            event.preventDefault()
+            event.stopPropagation()
+            onStartInlineRename(entry)
+          }}
+        >
+          {entry.name}
+        </strong>
+      )}
+      <span>{entry.kind === 'folder' ? '폴더' : extLabel(entry.ext)}</span>
+    </div>
+  )
+}
+
+void SortableGalleryCard
 
 function toWindowsStylePath(path: string): string {
   if (!path.startsWith('/mnt/')) {
@@ -278,6 +510,10 @@ function isImage(ext: string) {
   return ['png', 'jpg', 'jpeg', 'gif', 'bmp', 'webp'].includes(ext.toLowerCase())
 }
 
+function toEncodedFileSrc(path: string): string {
+  return encodeFileSrcUrl(convertFileSrc(path))
+}
+
 function deriveBookmarkName(path: string) {
   const winPath = toWindowsStylePath(path)
   const normalized = winPath.endsWith('\\') ? winPath.slice(0, -1) : winPath
@@ -289,10 +525,21 @@ function deriveBookmarkName(path: string) {
   return name || normalized
 }
 
+function getPathName(path: string): string {
+  const normalized = path.replace(/[\\/]+$/, '')
+  const slashIndex = Math.max(normalized.lastIndexOf('/'), normalized.lastIndexOf('\\'))
+  return slashIndex >= 0 ? normalized.slice(slashIndex + 1) : normalized
+}
+
+function dedupeById<T extends { id: string }>(items: T[]): T[] {
+  return Array.from(new Map(items.map((item) => [item.id, item])).values())
+}
+
 export default function App() {
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 5 } }))
   const clickTimerRef = useRef<number | null>(null)
   const operationToastTimerRef = useRef<number | null>(null)
+  const undoToastTimerRef = useRef<number | null>(null)
 
   const {
     currentPath, setCurrentPath,
@@ -303,7 +550,7 @@ export default function App() {
     folders, setFolders,
     previewFolders, setPreviewFolders,
     previewFiles, setPreviewFiles,
-    selectedFolderId, setSelectedFolderId,
+    setSelectedFolderId,
     selectedEntryIds, setSelectedEntryIds,
     clipboard, setClipboard,
     sortMode, setSortMode,
@@ -315,6 +562,8 @@ export default function App() {
     operationInProgress, setOperationInProgress,
     operationStatus, setOperationStatus,
     actionInProgress, setActionInProgress,
+    pushUndoEntry,
+    popUndoEntry,
   } = useExplorerStore()
 
   const lastClickedIndexRef = useRef<number>(-1)
@@ -329,6 +578,10 @@ export default function App() {
   // Phase B1: Rename modal state
   const [renameModalOpen, setRenameModalOpen] = useState(false)
   const [renameTarget, setRenameTarget] = useState<ExplorerEntry | null>(null)
+  const [inlineRenameId, setInlineRenameId] = useState<string | null>(null)
+  const [inlineRenameValue, setInlineRenameValue] = useState('')
+  const inlineRenameInputRef = useRef<HTMLInputElement | null>(null)
+  const inlineRenameSubmittingRef = useRef(false)
 
   // Phase B1: Create folder modal state
   const [createFolderModalOpen, setCreateFolderModalOpen] = useState(false)
@@ -338,11 +591,24 @@ export default function App() {
 
   // Phase E1: Context menu
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null)
+  const [selectedSidebarFolderIds, setSelectedSidebarFolderIds] = useState<string[]>([])
+  const [visibleFolderCount, setVisibleFolderCount] = useState(FOLDER_PAGE_SIZE)
+  const [visibleEntryCount, setVisibleEntryCount] = useState(ENTRY_PAGE_SIZE)
+  const [undoToastMessage, setUndoToastMessage] = useState<string | null>(null)
 
   const sortedFolders = useMemo(() => sortFolders(folders, sortMode), [folders, sortMode])
   const displayFolders = useMemo(
     () => (orderMode === 'manual' ? mergeManualOrder(sortedFolders, folderManualOrderIds) : sortedFolders),
     [sortedFolders, orderMode, folderManualOrderIds],
+  )
+  const visibleFolders = useMemo(
+    () => (orderMode === 'manual' ? displayFolders : displayFolders.slice(0, visibleFolderCount)),
+    [displayFolders, orderMode, visibleFolderCount],
+  )
+  const hasMoreFolders = orderMode !== 'manual' && visibleFolders.length < displayFolders.length
+  const selectedSidebarFolderIdSet = useMemo(
+    () => new Set(selectedSidebarFolderIds),
+    [selectedSidebarFolderIds],
   )
 
   const autoSortedEntries = useMemo<ExplorerEntry[]>(() => {
@@ -367,10 +633,24 @@ export default function App() {
     const q = searchQuery.trim().toLowerCase()
     return orderedEntries.filter((entry) => entry.name.toLowerCase().includes(q))
   }, [orderedEntries, searchQuery])
+  const visibleEntries = useMemo(
+    () => (orderMode === 'manual' ? displayEntries : displayEntries.slice(0, visibleEntryCount)),
+    [displayEntries, orderMode, visibleEntryCount],
+  )
+  const hasMoreEntries = orderMode !== 'manual' && visibleEntries.length < displayEntries.length
+  const selectedEntryIdSet = useMemo(() => new Set(selectedEntryIds), [selectedEntryIds])
+  const entryById = useMemo(
+    () => new Map(displayEntries.map((entry) => [entry.id, entry] as const)),
+    [displayEntries],
+  )
+  const entryIndexById = useMemo(
+    () => new Map(displayEntries.map((entry, index) => [entry.id, index] as const)),
+    [displayEntries],
+  )
 
   const selectedEntries = useMemo(
-    () => displayEntries.filter((entry) => selectedEntryIds.includes(entry.id)),
-    [displayEntries, selectedEntryIds],
+    () => displayEntries.filter((entry) => selectedEntryIdSet.has(entry.id)),
+    [displayEntries, selectedEntryIdSet],
   )
 
   const selectedPaths = useMemo(() => selectedEntries.map((e) => e.path), [selectedEntries])
@@ -378,10 +658,14 @@ export default function App() {
   const lastSelectedEntry = useMemo(() => {
     if (selectedEntryIds.length === 0) return null
     const lastId = selectedEntryIds[selectedEntryIds.length - 1]
-    return displayEntries.find((entry) => entry.id === lastId) ?? null
-  }, [displayEntries, selectedEntryIds])
+    return entryById.get(lastId) ?? null
+  }, [entryById, selectedEntryIds])
 
   const selectedFile = lastSelectedEntry?.kind === 'file' ? lastSelectedEntry : null
+  const previewPdfFiles = useMemo(
+    () => previewFiles.filter((file) => file.ext.toLowerCase() === 'pdf'),
+    [previewFiles],
+  )
 
   const cutPathSet = useMemo(
     () => new Set(clipboard?.mode === 'cut' ? clipboard.paths : []),
@@ -398,6 +682,51 @@ export default function App() {
     return fallback
   }
 
+  const clearUndoToast = () => {
+    if (undoToastTimerRef.current) {
+      window.clearTimeout(undoToastTimerRef.current)
+      undoToastTimerRef.current = null
+    }
+    setUndoToastMessage(null)
+  }
+
+  const showUndoToast = (entry: UndoEntry) => {
+    if (undoToastTimerRef.current) {
+      window.clearTimeout(undoToastTimerRef.current)
+    }
+    setUndoToastMessage(`${entry.label} (Ctrl+Z)`)
+    undoToastTimerRef.current = window.setTimeout(() => {
+      setUndoToastMessage(null)
+      undoToastTimerRef.current = null
+    }, 5000)
+  }
+
+  const registerUndoEntry = (entry: UndoEntry) => {
+    pushUndoEntry(entry)
+    showUndoToast(entry)
+  }
+
+  const toastState = useMemo(() => {
+    if (error) {
+      return {
+        message: error,
+        className: 'error-toast',
+        role: 'alert' as const,
+        ariaLive: 'assertive' as const,
+      }
+    }
+    if (!operationStatus) {
+      return null
+    }
+    const isSuccess = operationStatus.includes('완료')
+    return {
+      message: operationStatus,
+      className: isSuccess ? 'success-toast' : 'info-toast',
+      role: 'status' as const,
+      ariaLive: 'polite' as const,
+    }
+  }, [error, operationStatus])
+
   async function loadDrives() {
     try {
       const [driveResult, quickResult] = await Promise.all([
@@ -412,37 +741,60 @@ export default function App() {
     }
   }
 
-  async function loadFolders(path: string) {
+  async function loadFolders(path: string): Promise<FolderItem[]> {
     setFolderLoading(true)
     setError(null)
 
     try {
       const result = await invoke<FolderItem[]>('list_folders', { parentPath: path })
       setFolders(result)
-      setSelectedFolderId((prev) => (prev && result.some((folder) => folder.id === prev) ? prev : null))
+      const folderIdSet = new Set(result.map((folder) => folder.id))
+      setSelectedSidebarFolderIds((prev) => {
+        const next = prev.filter((id) => folderIdSet.has(id))
+        setSelectedFolderId((current) => {
+          if (current && folderIdSet.has(current)) return current
+          return next.length > 0 ? next[next.length - 1] : null
+        })
+        return next
+      })
+      return result
     } catch (e) {
       setError(e instanceof Error ? e.message : '폴더를 불러오지 못했습니다.')
+      return []
     } finally {
       setFolderLoading(false)
     }
   }
 
-  async function loadPreviewEntries(path: string) {
+  async function loadPreviewEntries(pathOrPaths: string | string[]) {
     setPreviewLoading(true)
     setError(null)
+    const targetPaths = Array.isArray(pathOrPaths)
+      ? Array.from(new Set(pathOrPaths.filter((path) => path.length > 0)))
+      : [pathOrPaths]
 
     try {
-      const [folderResult, fileResult] = await Promise.all([
-        invoke<FolderItem[]>('list_folders', { parentPath: path }),
-        invoke<FileItem[]>('list_files', { parentPath: path }),
-      ])
+      const results = await Promise.all(
+        targetPaths.map((path) =>
+          Promise.all([
+            invoke<FolderItem[]>('list_folders', { parentPath: path }),
+            invoke<FileItem[]>('list_files', { parentPath: path }),
+          ]),
+        ),
+      )
+      const folderResult = dedupeById(results.flatMap(([folders]) => folders))
+      const fileResult = dedupeById(results.flatMap(([, files]) => files))
       setPreviewFolders(folderResult)
       setPreviewFiles(fileResult)
 
       const idSet = new Set([...folderResult.map((entry) => entry.id), ...fileResult.map((entry) => entry.id)])
       setSelectedEntryIds((prev) => prev.filter((id) => idSet.has(id)))
     } catch (e) {
-      setError(e instanceof Error ? e.message : '미리보기 항목을 불러오지 못했습니다.')
+      const fallback =
+        targetPaths.length > 1
+          ? '선택한 폴더 미리보기 항목을 불러오지 못했습니다.'
+          : '미리보기 항목을 불러오지 못했습니다.'
+      setError(e instanceof Error ? e.message : fallback)
       setPreviewFolders([])
       setPreviewFiles([])
       setSelectedEntryIds([])
@@ -455,7 +807,10 @@ export default function App() {
     setCurrentPath(path)
     setPreviewPath(path)
     setSelectedFolderId(null)
+    setSelectedSidebarFolderIds([])
     setSelectedEntryIds([])
+    setInlineRenameId(null)
+    setInlineRenameValue('')
     setSearchQuery('')
     lastClickedIndexRef.current = -1
     await Promise.all([loadFolders(path), loadPreviewEntries(path)])
@@ -463,8 +818,20 @@ export default function App() {
 
   async function refreshExplorer() {
     await loadDrives()
+    let refreshedFolders: FolderItem[] = []
     if (currentPath) {
-      await loadFolders(currentPath)
+      refreshedFolders = await loadFolders(currentPath)
+    }
+
+    if (selectedSidebarFolderIds.length > 1) {
+      const selectedFolderIdSet = new Set(selectedSidebarFolderIds)
+      const selectedFolderPaths = refreshedFolders
+        .filter((folder) => selectedFolderIdSet.has(folder.id))
+        .map((folder) => folder.path)
+      if (selectedFolderPaths.length > 1) {
+        await loadPreviewEntries(selectedFolderPaths)
+        return
+      }
     }
 
     const targetPreview = previewPath || currentPath
@@ -477,8 +844,10 @@ export default function App() {
     paths: string[],
     destinationPath: string,
     mode: 'copy' | 'move',
+    options?: { recordUndo?: boolean },
   ): Promise<boolean> {
     if (operationInProgress) return false
+    const recordUndo = options?.recordUndo ?? true
     const normalized = paths.filter((path) => path && path !== destinationPath)
     if (!normalized.length) return false
 
@@ -492,11 +861,30 @@ export default function App() {
     setError(null)
 
     try {
-      if (mode === 'copy') {
-        await invoke('copy_paths', { paths: normalized, destinationDir: destinationPath })
-      } else {
-        await invoke('move_paths', { paths: normalized, destinationDir: destinationPath })
+      const movedOrCopiedPaths =
+        mode === 'copy'
+          ? await invoke<string[]>('copy_paths', { paths: normalized, destinationDir: destinationPath })
+          : await invoke<string[]>('move_paths', { paths: normalized, destinationDir: destinationPath })
+
+      if (recordUndo) {
+        if (mode === 'copy') {
+          registerUndoEntry({
+            type: 'copy',
+            label: movedOrCopiedPaths.length === 1 ? '복사 완료' : `복사 완료 (${movedOrCopiedPaths.length}개)`,
+            copiedPaths: movedOrCopiedPaths,
+          })
+        } else {
+          registerUndoEntry({
+            type: 'move',
+            label: movedOrCopiedPaths.length === 1 ? '이동 완료' : `이동 완료 (${movedOrCopiedPaths.length}개)`,
+            mappings: normalized.map((fromPath, index) => ({
+              fromPath: movedOrCopiedPaths[index] ?? fromPath,
+              toPath: fromPath,
+            })),
+          })
+        }
       }
+
       await refreshExplorer()
       setOperationInProgress(false)
       setOperationStatus(mode === 'copy' ? '복사 완료' : '이동 완료')
@@ -530,24 +918,57 @@ export default function App() {
     if (selectedEntryIds.length !== 1) return
     const entry = displayEntries.find((e) => e.id === selectedEntryIds[0])
     if (!entry) return
+    cancelInlineRename()
     setRenameTarget(entry)
     setRenameModalOpen(true)
   }
 
-  async function handleRenameConfirm(nextName: string) {
+  function beginInlineRename(entry: ExplorerEntry) {
     setRenameModalOpen(false)
-    const entry = renameTarget
     setRenameTarget(null)
-    if (!entry) return
-    if (nextName.trim() === '' || nextName.trim() === entry.name) return
-    if (actionInProgress) return
+    setInlineRenameId(entry.id)
+    setInlineRenameValue(entry.name)
+    if (!selectedEntryIdSet.has(entry.id)) {
+      setSelectedEntryIds([entry.id])
+    }
+    const entryIndex = entryIndexById.get(entry.id) ?? -1
+    ensureEntryVisible(entryIndex)
+  }
+
+  function cancelInlineRename() {
+    if (inlineRenameSubmittingRef.current) return
+    setInlineRenameId(null)
+    setInlineRenameValue('')
+  }
+
+  async function renameEntry(
+    entry: ExplorerEntry,
+    nextName: string,
+    options?: { recordUndo?: boolean },
+  ): Promise<string | null> {
+    const trimmed = nextName.trim()
+    const recordUndo = options?.recordUndo ?? true
+    if (!trimmed || trimmed === entry.name) {
+      return null
+    }
+    if (actionInProgress) {
+      return null
+    }
     setActionInProgress(true)
 
     try {
-      const renamedPath = await invoke<string>('rename_path', { path: entry.path, newName: nextName.trim() })
+      const renamedPath = await invoke<string>('rename_path', { path: entry.path, newName: trimmed })
       setSelectedEntryIds([renamedPath])
 
-      // Sync order DB with the new path
+      if (recordUndo) {
+        registerUndoEntry({
+          type: 'rename',
+          label: `이름 변경 완료: ${entry.name}`,
+          oldPath: entry.path,
+          newPath: renamedPath,
+        })
+      }
+
       const parentPath = previewPath || currentPath
       if (parentPath) {
         await invoke('rename_order_entry', {
@@ -558,10 +979,37 @@ export default function App() {
       }
 
       await refreshExplorer()
+      return renamedPath
     } catch (e) {
       setError(e instanceof Error ? e.message : '이름 변경에 실패했습니다.')
+      return null
     } finally {
       setActionInProgress(false)
+    }
+  }
+
+  async function handleRenameConfirm(nextName: string) {
+    setRenameModalOpen(false)
+    const entry = renameTarget
+    setRenameTarget(null)
+    if (!entry) return
+    await renameEntry(entry, nextName)
+  }
+
+  async function commitInlineRename() {
+    if (!inlineRenameId || inlineRenameSubmittingRef.current) return
+
+    const entry = entryById.get(inlineRenameId)
+    const pendingName = inlineRenameValue
+    setInlineRenameId(null)
+    setInlineRenameValue('')
+
+    if (!entry) return
+    inlineRenameSubmittingRef.current = true
+    try {
+      await renameEntry(entry, pendingName)
+    } finally {
+      inlineRenameSubmittingRef.current = false
     }
   }
 
@@ -596,10 +1044,15 @@ export default function App() {
   async function deleteSelected() {
     if (selectedEntries.length === 0) return
     const names = selectedEntries.map((e) => e.name).join('\n')
+    const deletedPaths = [...selectedPaths]
+    const deletedLabel =
+      selectedEntries.length === 1
+        ? `휴지통 이동: ${selectedEntries[0].name}`
+        : `휴지통 이동: ${selectedEntries.length}개 항목`
     const msg =
       selectedEntries.length === 1
-        ? `선택한 항목을 삭제하시겠습니까?\n${names}`
-        : `선택한 ${selectedEntries.length}개 항목을 삭제하시겠습니까?\n${names}`
+        ? `선택한 항목을 휴지통으로 이동하시겠습니까?\n${names}`
+        : `선택한 ${selectedEntries.length}개 항목을 휴지통으로 이동하시겠습니까?\n${names}`
     const confirmed = window.confirm(msg)
     if (!confirmed) return
     if (actionInProgress) return
@@ -607,10 +1060,89 @@ export default function App() {
 
     try {
       await invoke('delete_paths', { paths: selectedPaths })
+      registerUndoEntry({
+        type: 'delete',
+        label: deletedLabel,
+        deletedPaths,
+      })
       setSelectedEntryIds([])
       await refreshExplorer()
     } catch (e) {
-      setError(e instanceof Error ? e.message : '삭제에 실패했습니다.')
+      setError(e instanceof Error ? e.message : '휴지통 이동에 실패했습니다.')
+    } finally {
+      setActionInProgress(false)
+    }
+  }
+
+  async function undoLastAction() {
+    if (actionInProgress || operationInProgress) return
+    const entry = popUndoEntry()
+    if (!entry) {
+      setOperationStatus('실행 취소할 작업이 없습니다.')
+      operationToastTimerRef.current = window.setTimeout(() => {
+        setOperationStatus(null)
+        operationToastTimerRef.current = null
+      }, 2000)
+      return
+    }
+
+    clearUndoToast()
+    setActionInProgress(true)
+    setError(null)
+
+    try {
+      switch (entry.type) {
+        case 'rename': {
+          const originalName = getPathName(entry.oldPath)
+          const restoredPath = await invoke<string>('rename_path', {
+            path: entry.newPath,
+            newName: originalName,
+          })
+          setSelectedEntryIds([restoredPath])
+          break
+        }
+        case 'move': {
+          for (const mapping of entry.mappings) {
+            const destinationDir = getFileDirectory(mapping.toPath)
+            const destinationName = getPathName(mapping.toPath)
+            const movedBack = await invoke<string[]>('move_paths', {
+              paths: [mapping.fromPath],
+              destinationDir,
+            })
+            const movedBackPath = movedBack[0]
+            if (movedBackPath && movedBackPath !== mapping.toPath) {
+              await invoke<string>('rename_path', {
+                path: movedBackPath,
+                newName: destinationName,
+              })
+            }
+          }
+          break
+        }
+        case 'copy': {
+          await invoke('delete_paths', { paths: entry.copiedPaths })
+          break
+        }
+        case 'delete': {
+          const restoredPaths = await invoke<string[]>('restore_paths_from_trash', {
+            paths: entry.deletedPaths,
+          })
+          if (restoredPaths.length > 0) {
+            setSelectedEntryIds(restoredPaths)
+          }
+          break
+        }
+      }
+
+      await refreshExplorer()
+      setOperationStatus('실행 취소 완료')
+      operationToastTimerRef.current = window.setTimeout(() => {
+        setOperationStatus(null)
+        operationToastTimerRef.current = null
+      }, 3000)
+    } catch (e) {
+      pushUndoEntry(entry)
+      setError(resolveErrorMessage(e, '실행 취소에 실패했습니다.'))
     } finally {
       setActionInProgress(false)
     }
@@ -687,6 +1219,41 @@ export default function App() {
   }, [orderMode, previewPath])
 
   useEffect(() => {
+    setVisibleFolderCount(FOLDER_PAGE_SIZE)
+  }, [currentPath, sortMode, orderMode])
+
+  useEffect(() => {
+    setVisibleEntryCount(ENTRY_PAGE_SIZE)
+  }, [previewPath, searchQuery, sortMode, orderMode])
+
+  const ensureEntryVisible = (entryIndex: number) => {
+    if (entryIndex < 0 || orderMode === 'manual') return
+    setVisibleEntryCount((prev) => {
+      if (entryIndex < prev) return prev
+      return Math.min(displayEntries.length, Math.max(prev + ENTRY_PAGE_SIZE, entryIndex + 1))
+    })
+  }
+
+  useEffect(() => {
+    if (!inlineRenameId) return
+
+    const raf = window.requestAnimationFrame(() => {
+      inlineRenameInputRef.current?.focus()
+      inlineRenameInputRef.current?.select()
+    })
+
+    return () => window.cancelAnimationFrame(raf)
+  }, [inlineRenameId, viewMode])
+
+  useEffect(() => {
+    if (!inlineRenameId) return
+    if (!entryById.has(inlineRenameId)) {
+      setInlineRenameId(null)
+      setInlineRenameValue('')
+    }
+  }, [inlineRenameId, entryById])
+
+  useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
       const target = event.target as HTMLElement | null
       if (target && ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName)) {
@@ -717,6 +1284,11 @@ export default function App() {
         }
         return
       }
+      if (ctrlOrMeta && !event.shiftKey && event.key.toLowerCase() === 'z') {
+        event.preventDefault()
+        void undoLastAction()
+        return
+      }
       if (ctrlOrMeta && event.shiftKey && event.key.toLowerCase() === 'n') {
         event.preventDefault()
         void createNewFolder()
@@ -741,10 +1313,11 @@ export default function App() {
         event.preventDefault()
         const currentIndex =
           selectedEntryIds.length > 0
-            ? displayEntries.findIndex((e) => e.id === selectedEntryIds[selectedEntryIds.length - 1])
+            ? (entryIndexById.get(selectedEntryIds[selectedEntryIds.length - 1]) ?? -1)
             : -1
         const nextIndex = Math.min(currentIndex + 1, displayEntries.length - 1)
         if (nextIndex >= 0) {
+          ensureEntryVisible(nextIndex)
           if (event.shiftKey) {
             const id = displayEntries[nextIndex].id
             setSelectedEntryIds((prev) => (prev.includes(id) ? prev : [...prev, id]))
@@ -759,10 +1332,11 @@ export default function App() {
         event.preventDefault()
         const currentIndex =
           selectedEntryIds.length > 0
-            ? displayEntries.findIndex((e) => e.id === selectedEntryIds[selectedEntryIds.length - 1])
+            ? (entryIndexById.get(selectedEntryIds[selectedEntryIds.length - 1]) ?? displayEntries.length)
             : displayEntries.length
         const prevIndex = Math.max(currentIndex - 1, 0)
         if (displayEntries.length > 0) {
+          ensureEntryVisible(prevIndex)
           if (event.shiftKey) {
             const id = displayEntries[prevIndex].id
             setSelectedEntryIds((prev) => (prev.includes(id) ? prev : [...prev, id]))
@@ -777,7 +1351,7 @@ export default function App() {
 
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [selectedEntries, selectedPaths, selectedEntryIds, lastSelectedEntry, displayEntries, previewPath, clipboard, operationInProgress])
+  }, [selectedEntries, selectedPaths, selectedEntryIds, lastSelectedEntry, displayEntries, entryIndexById, previewPath, clipboard, operationInProgress, orderMode])
 
   useEffect(() => {
     if (!error) return
@@ -789,6 +1363,9 @@ export default function App() {
     return () => {
       if (operationToastTimerRef.current) {
         window.clearTimeout(operationToastTimerRef.current)
+      }
+      if (undoToastTimerRef.current) {
+        window.clearTimeout(undoToastTimerRef.current)
       }
     }
   }, [])
@@ -817,15 +1394,44 @@ export default function App() {
     }
   }, [previewPath, currentPath, operationInProgress])
 
-  const handleSidebarFolderClick = (folder: FolderItem) => {
+  const handleSidebarFolderClick = (folder: FolderItem, modifiers: SidebarSelectModifiers) => {
     if (clickTimerRef.current) {
       window.clearTimeout(clickTimerRef.current)
     }
 
     clickTimerRef.current = window.setTimeout(() => {
-      setSelectedFolderId(folder.id)
-      setPreviewPath(folder.path)
-      void loadPreviewEntries(folder.path)
+      setInlineRenameId(null)
+      setInlineRenameValue('')
+      const nextSelectedIds = modifiers.ctrl
+        ? (selectedSidebarFolderIdSet.has(folder.id)
+          ? selectedSidebarFolderIds.filter((id) => id !== folder.id)
+          : [...selectedSidebarFolderIds, folder.id])
+        : [folder.id]
+      const nextFolderIdSet = new Set(nextSelectedIds)
+      const nextSelectedFolders = displayFolders.filter((item) => nextFolderIdSet.has(item.id))
+      const normalizedSelectedIds = nextSelectedFolders.map((item) => item.id)
+
+      setSelectedSidebarFolderIds(normalizedSelectedIds)
+
+      if (nextSelectedFolders.length === 0) {
+        setSelectedFolderId(null)
+        setPreviewPath(currentPath)
+        if (currentPath) {
+          void loadPreviewEntries(currentPath)
+        }
+        clickTimerRef.current = null
+        return
+      }
+
+      const activeFolder = nextSelectedFolders.find((item) => item.id === folder.id) ?? nextSelectedFolders[nextSelectedFolders.length - 1]
+      setSelectedFolderId(activeFolder.id)
+      setPreviewPath(activeFolder.path)
+
+      if (nextSelectedFolders.length > 1) {
+        void loadPreviewEntries(nextSelectedFolders.map((item) => item.path))
+      } else {
+        void loadPreviewEntries(activeFolder.path)
+      }
       clickTimerRef.current = null
     }, 200)
   }
@@ -836,11 +1442,16 @@ export default function App() {
       clickTimerRef.current = null
     }
 
+    setSelectedSidebarFolderIds([])
     void navigateToPath(folder.path)
   }
 
   const handleEntrySelect = (entry: ExplorerEntry, modifiers: SelectModifiers) => {
-    const entryIndex = displayEntries.findIndex((e) => e.id === entry.id)
+    const entryIndex = entryIndexById.get(entry.id) ?? -1
+    if (entryIndex < 0) return
+    if (inlineRenameId && inlineRenameId !== entry.id) {
+      cancelInlineRename()
+    }
 
     if (modifiers.shift && lastClickedIndexRef.current >= 0) {
       const start = Math.min(lastClickedIndexRef.current, entryIndex)
@@ -856,14 +1467,17 @@ export default function App() {
       } else {
         setSelectedEntryIds(rangeIds)
       }
+      ensureEntryVisible(entryIndex)
     } else if (modifiers.ctrl) {
       setSelectedEntryIds((prev) =>
         prev.includes(entry.id) ? prev.filter((id) => id !== entry.id) : [...prev, entry.id],
       )
       lastClickedIndexRef.current = entryIndex
+      ensureEntryVisible(entryIndex)
     } else {
       setSelectedEntryIds([entry.id])
       lastClickedIndexRef.current = entryIndex
+      ensureEntryVisible(entryIndex)
     }
   }
 
@@ -882,6 +1496,14 @@ export default function App() {
 
   const handleRefresh = async () => {
     await refreshExplorer()
+  }
+
+  const handleLoadMoreFolders = () => {
+    setVisibleFolderCount((prev) => Math.min(displayFolders.length, prev + FOLDER_PAGE_SIZE))
+  }
+
+  const handleLoadMoreEntries = () => {
+    setVisibleEntryCount((prev) => Math.min(displayEntries.length, prev + ENTRY_PAGE_SIZE))
   }
 
   const handleOrderModeToggle = async () => {
@@ -950,9 +1572,14 @@ export default function App() {
 
   const handleContextMenu = (e: React.MouseEvent, entry: ExplorerEntry) => {
     e.preventDefault()
-    if (!selectedEntryIds.includes(entry.id)) {
+    if (inlineRenameId && inlineRenameId !== entry.id) {
+      cancelInlineRename()
+    }
+    if (!selectedEntryIdSet.has(entry.id)) {
       setSelectedEntryIds([entry.id])
-      lastClickedIndexRef.current = displayEntries.findIndex((item) => item.id === entry.id)
+      const entryIndex = entryIndexById.get(entry.id) ?? -1
+      lastClickedIndexRef.current = entryIndex
+      ensureEntryVisible(entryIndex)
     }
     setContextMenu({ x: e.clientX, y: e.clientY })
   }
@@ -996,7 +1623,7 @@ export default function App() {
         onClick: () => void pasteClipboard(),
       },
       {
-        label: '삭제',
+        label: '휴지통으로 이동',
         icon: <Trash2 size={14} />,
         shortcut: 'Del',
         danger: true,
@@ -1065,6 +1692,7 @@ export default function App() {
             disabled={orderMode === 'manual'}
           >
             <option value="name">이름</option>
+            <option value="size">크기</option>
             <option value="modifiedAt">수정일</option>
           </select>
         </label>
@@ -1102,7 +1730,7 @@ export default function App() {
             <Pencil size={15} /> 이름 바꾸기(F2)
           </button>
           <button className="win-btn" disabled={selectedEntries.length === 0 || actionInProgress} onClick={() => void deleteSelected()}>
-            <Trash2 size={15} /> 삭제
+            <Trash2 size={15} /> 휴지통으로 이동
           </button>
         </div>
 
@@ -1181,32 +1809,42 @@ export default function App() {
           {folderLoading ? (
             <p className="state-text">폴더 로딩 중...</p>
           ) : (
-            <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleFolderDragEnd} onDragStart={(event) => setActiveDragId(String(event.active.id))}>
-              <SortableContext items={displayFolders.map((folder) => folder.id)} strategy={verticalListSortingStrategy}>
-                <ul className="sidebar-list" role="listbox" aria-label="폴더 목록">
-                  {displayFolders.map((folder) => (
-                    <SortableFolderRow
-                      key={folder.id}
-                      folder={folder}
-                      selected={selectedFolderId === folder.id}
-                      manualMode={orderMode === 'manual'}
-                      onClick={handleSidebarFolderClick}
-                      onDoubleClick={handleSidebarFolderDoubleClick}
-                      onDropEntries={(paths, destinationPath, copyMode) =>
-                        void applyPathOperation(paths, destinationPath, copyMode ? 'copy' : 'move')
-                      }
-                    />
-                  ))}
-                </ul>
-              </SortableContext>
-              <DragOverlay>
-                {activeDragId ? (
-                  <div style={{ padding: '8px 12px', background: '#fff', border: '1px solid var(--accent)', borderRadius: 8, boxShadow: '0 4px 12px rgba(0,0,0,0.15)', fontSize: 14, display: 'flex', alignItems: 'center', gap: 6 }}>
-                    <Folder size={16} /> {folders.find((f) => f.id === activeDragId)?.name}
-                  </div>
-                ) : null}
-              </DragOverlay>
-            </DndContext>
+            <>
+              <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleFolderDragEnd} onDragStart={(event) => setActiveDragId(String(event.active.id))}>
+                <SortableContext items={visibleFolders.map((folder) => folder.id)} strategy={verticalListSortingStrategy}>
+                  <ul className="sidebar-list" role="listbox" aria-label="폴더 목록" aria-multiselectable="true">
+                    {visibleFolders.map((folder) => (
+                      <SortableFolderRow
+                        key={folder.id}
+                        folder={folder}
+                        selected={selectedSidebarFolderIdSet.has(folder.id)}
+                        manualMode={orderMode === 'manual'}
+                        onClick={handleSidebarFolderClick}
+                        onDoubleClick={handleSidebarFolderDoubleClick}
+                        onDropEntries={(paths, destinationPath, copyMode) =>
+                          void applyPathOperation(paths, destinationPath, copyMode ? 'copy' : 'move')
+                        }
+                      />
+                    ))}
+                  </ul>
+                </SortableContext>
+                <DragOverlay>
+                  {activeDragId ? (
+                    <div style={{ padding: '8px 12px', background: '#fff', border: '1px solid var(--accent)', borderRadius: 8, boxShadow: '0 4px 12px rgba(0,0,0,0.15)', fontSize: 14, display: 'flex', alignItems: 'center', gap: 6 }}>
+                      <Folder size={16} /> {displayFolders.find((folder) => folder.id === activeDragId)?.name}
+                    </div>
+                  ) : null}
+                </DragOverlay>
+              </DndContext>
+              {hasMoreFolders && (
+                <div className="load-more-wrap">
+                  <p className="state-text compact">{visibleFolders.length} / {displayFolders.length}개 폴더 표시 중</p>
+                  <button className="win-btn load-more-btn" onClick={handleLoadMoreFolders}>
+                    폴더 더 보기 (+{Math.min(FOLDER_PAGE_SIZE, displayFolders.length - visibleFolders.length)})
+                  </button>
+                </div>
+              )}
+            </>
           )}
         </aside>
 
@@ -1214,6 +1852,8 @@ export default function App() {
           <div className="pane-head">
             <p style={{ margin: 0, color: 'var(--muted)' }}>
               {displayEntries.length}개 항목
+              {hasMoreEntries && ` · ${visibleEntries.length}개 표시 중`}
+              {selectedSidebarFolderIds.length > 1 && ` · 폴더 ${selectedSidebarFolderIds.length}개 통합 보기`}
               {selectedEntries.length > 0 && ` · ${selectedEntries.length}개 선택됨`}
               {clipboard && ` · 클립보드: ${clipboard.mode === 'copy' ? '복사' : '잘라내기'} ${clipboard.paths.length}개`}
             </p>
@@ -1221,7 +1861,7 @@ export default function App() {
               <button
                 className="win-btn"
                 style={{ borderColor: 'var(--border)' }}
-                disabled={previewFiles.filter((f) => f.ext.toLowerCase() === 'pdf').length < 2}
+                disabled={previewPdfFiles.length < 2}
                 onClick={() => setMergePdfModalOpen(true)}
               >
                 PDF 병합
@@ -1249,21 +1889,34 @@ export default function App() {
                 <span role="columnheader">수정한 날짜</span>
               </div>
               <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleEntryDragEnd} onDragStart={(event) => setActiveDragId(String(event.active.id))}>
-                <SortableContext items={displayEntries.map((entry) => entry.id)} strategy={verticalListSortingStrategy}>
-                  <ul className="table-body" role="rowgroup" onClick={(e) => { if (e.target === e.currentTarget) { setSelectedEntryIds([]); lastClickedIndexRef.current = -1 } }}>
-                    {displayEntries.map((entry) => (
+                <SortableContext items={visibleEntries.map((entry) => entry.id)} strategy={verticalListSortingStrategy}>
+                  <ul className="table-body" role="rowgroup" onClick={(e) => {
+                    if (e.target === e.currentTarget) {
+                      cancelInlineRename()
+                      setSelectedEntryIds([])
+                      lastClickedIndexRef.current = -1
+                    }
+                  }}>
+                    {visibleEntries.map((entry) => (
                       <SortableEntryRow
                         key={entry.id}
                         entry={entry}
-                        selected={selectedEntryIds.includes(entry.id)}
+                        selected={selectedEntryIdSet.has(entry.id)}
                         manualMode={orderMode === 'manual'}
                         dragPaths={selectedPaths}
                         isCut={cutPathSet.has(entry.path)}
+                        isInlineRenaming={inlineRenameId === entry.id}
+                        inlineRenameValue={inlineRenameValue}
+                        inlineRenameInputRef={inlineRenameInputRef}
                         onSelect={handleEntrySelect}
                         onOpen={(item) => void openEntry(item)}
                         onDropEntries={(paths, destinationPath, copyMode) =>
                           void applyPathOperation(paths, destinationPath, copyMode ? 'copy' : 'move')
                         }
+                        onStartInlineRename={beginInlineRename}
+                        onInlineRenameChange={setInlineRenameValue}
+                        onInlineRenameCommit={() => void commitInlineRename()}
+                        onInlineRenameCancel={cancelInlineRename}
                         onContextMenu={handleContextMenu}
                       />
                     ))}
@@ -1272,59 +1925,99 @@ export default function App() {
                 <DragOverlay>
                   {activeDragId ? (
                     <div style={{ padding: '8px 12px', background: '#fff', border: '1px solid var(--accent)', borderRadius: 8, boxShadow: '0 4px 12px rgba(0,0,0,0.15)', fontSize: 14 }}>
-                      {displayEntries.find((e) => e.id === activeDragId)?.name}
+                      {entryById.get(activeDragId)?.name}
                     </div>
                   ) : null}
                 </DragOverlay>
               </DndContext>
+              {hasMoreEntries && (
+                <div className="load-more-wrap">
+                  <button className="win-btn load-more-btn" onClick={handleLoadMoreEntries}>
+                    항목 더 보기 (+{Math.min(ENTRY_PAGE_SIZE, displayEntries.length - visibleEntries.length)})
+                  </button>
+                </div>
+              )}
             </div>
           )}
 
           {!previewLoading && displayEntries.length > 0 && viewMode === 'gallery' && (
-            <div className="gallery-wrap" onClick={(e) => { if (e.target === e.currentTarget) { setSelectedEntryIds([]); lastClickedIndexRef.current = -1 } }}>
-              {displayEntries.map((entry) => (
-                <button
-                  key={entry.id}
-                  className={`gallery-card ${selectedEntryIds.includes(entry.id) ? 'selected' : ''} ${entry.isHidden ? 'hidden-entry' : ''} ${cutPathSet.has(entry.path) ? 'cut-entry' : ''}`}
-                  draggable={orderMode !== 'manual'}
-                  onDragStart={(event) => writeDragPayload(event, selectedEntryIds.includes(entry.id) && selectedPaths.length > 0 ? selectedPaths : [entry.path])}
-                  onDragOver={(event) => {
-                    if (entry.kind === 'folder') {
-                      event.preventDefault()
-                    }
-                  }}
-                  onDrop={(event) => {
-                    if (entry.kind !== 'folder') return
-                    event.preventDefault()
-                    const paths = readDragPayload(event)
-                    if (!paths.length) return
-                    void applyPathOperation(paths, entry.path, event.ctrlKey || event.metaKey ? 'copy' : 'move')
-                  }}
-                  onClick={(e) => handleEntrySelect(entry, { ctrl: e.ctrlKey || e.metaKey, shift: e.shiftKey })}
-                  onDoubleClick={() => void openEntry(entry)}
-                  onContextMenu={(e) => handleContextMenu(e, entry)}
-                >
-                  <div className="gallery-thumb">
-                    {entry.kind === 'folder' ? (
-                      <Folder size={32} />
-                    ) : isImage(entry.ext) ? (
-                      <img src={convertFileSrc(entry.path)} alt={entry.name} loading="lazy" />
-                    ) : entry.ext === 'pdf' ? (
-                      <FileText size={32} />
-                    ) : (
-                      <File size={32} />
-                    )}
+            <>
+              <DndContext
+                sensors={sensors}
+                collisionDetection={closestCenter}
+                onDragEnd={handleEntryDragEnd}
+                onDragStart={(event) => setActiveDragId(String(event.active.id))}
+              >
+                <SortableContext items={visibleEntries.map((entry) => entry.id)} strategy={verticalListSortingStrategy}>
+                  <div
+                    className="gallery-wrap"
+                    onClick={(e) => {
+                      if (e.target === e.currentTarget) {
+                        cancelInlineRename()
+                        setSelectedEntryIds([])
+                        lastClickedIndexRef.current = -1
+                      }
+                    }}
+                  >
+                    {visibleEntries.map((entry) => (
+                      <SortableGalleryCard
+                        key={entry.id}
+                        entry={entry}
+                        selected={selectedEntryIdSet.has(entry.id)}
+                        manualMode={orderMode === 'manual'}
+                        dragPaths={selectedPaths}
+                        isCut={cutPathSet.has(entry.path)}
+                        isInlineRenaming={inlineRenameId === entry.id}
+                        inlineRenameValue={inlineRenameValue}
+                        inlineRenameInputRef={inlineRenameInputRef}
+                        onSelect={handleEntrySelect}
+                        onOpen={(item) => void openEntry(item)}
+                        onDropEntries={(paths, destinationPath, copyMode) =>
+                          void applyPathOperation(paths, destinationPath, copyMode ? 'copy' : 'move')
+                        }
+                        onStartInlineRename={beginInlineRename}
+                        onInlineRenameChange={setInlineRenameValue}
+                        onInlineRenameCommit={() => void commitInlineRename()}
+                        onInlineRenameCancel={cancelInlineRename}
+                        onContextMenu={handleContextMenu}
+                      />
+                    ))}
                   </div>
-                  <strong title={entry.name}>{entry.name}</strong>
-                  <span>{entry.kind === 'folder' ? '폴더' : extLabel(entry.ext)}</span>
-                </button>
-              ))}
-            </div>
+                </SortableContext>
+                <DragOverlay>
+                  {activeDragId ? (
+                    <div style={{ padding: '8px 12px', background: '#fff', border: '1px solid var(--accent)', borderRadius: 8, boxShadow: '0 4px 12px rgba(0,0,0,0.15)', fontSize: 14 }}>
+                      {entryById.get(activeDragId)?.name}
+                    </div>
+                  ) : null}
+                </DragOverlay>
+              </DndContext>
+              {hasMoreEntries && (
+                <div className="load-more-wrap">
+                  <button className="win-btn load-more-btn" onClick={handleLoadMoreEntries}>
+                    항목 더 보기 (+{Math.min(ENTRY_PAGE_SIZE, displayEntries.length - visibleEntries.length)})
+                  </button>
+                </div>
+              )}
+            </>
           )}
         </section>
       </main>
 
-      {(operationStatus || error) && <div className="error-toast" role="alert" aria-live="assertive">{error ?? operationStatus}</div>}
+      {toastState && (
+        <div className={`toast ${toastState.className}`} role={toastState.role} aria-live={toastState.ariaLive}>
+          {toastState.message}
+        </div>
+      )}
+
+      {undoToastMessage && (
+        <div className="toast info-toast undo-toast" role="status" aria-live="polite">
+          <span>{undoToastMessage}</span>
+          <button className="undo-toast-btn" onClick={() => void undoLastAction()}>
+            실행 취소
+          </button>
+        </div>
+      )}
 
       <PdfViewer
         open={pdfModalOpen}
@@ -1351,7 +2044,7 @@ export default function App() {
 
       <PdfMergeModal
         open={mergePdfModalOpen}
-        pdfFiles={previewFiles.filter((f) => f.ext.toLowerCase() === 'pdf')}
+        pdfFiles={previewPdfFiles}
         currentDir={previewPath || currentPath}
         onClose={() => setMergePdfModalOpen(false)}
         onMerged={() => {
