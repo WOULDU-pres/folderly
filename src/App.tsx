@@ -1264,7 +1264,6 @@ export default function App() {
   }, [entryById, selectedEntryIds])
 
   const selectedFile = lastSelectedEntry?.kind === 'file' ? lastSelectedEntry : null
-  const isPdfViewerOpen = pdfModalOpen && selectedFile?.ext?.toLowerCase() === 'pdf'
   const previewPdfFiles = useMemo<FileItem[]>(
     () =>
       orderedEntries
@@ -2878,25 +2877,21 @@ export default function App() {
               드래그 기본 동작: 이동 (Ctrl/Cmd를 누르면 복사)
             </p>
             <div className="pane-actions">
-              {isPdfViewerOpen && (
-                <>
-                  <button
-                    className="win-btn"
-                    style={{ borderColor: 'var(--border)' }}
-                    disabled={previewPdfFiles.length < 2}
-                    onClick={() => setMergePdfModalOpen(true)}
-                  >
-                    PDF 병합
-                  </button>
-                  <button
-                    className="win-btn primary"
-                    disabled={!isPdfViewerOpen}
-                    onClick={() => setPdfModalOpen(true)}
-                  >
-                    PDF 페이지 추출
-                  </button>
-                </>
-              )}
+              <button
+                className="win-btn"
+                style={{ borderColor: 'var(--border)' }}
+                disabled={previewPdfFiles.length < 2}
+                onClick={() => setMergePdfModalOpen(true)}
+              >
+                PDF 병합
+              </button>
+              <button
+                className="win-btn primary"
+                disabled={selectedFile?.ext.toLowerCase() !== 'pdf'}
+                onClick={() => setPdfModalOpen(true)}
+              >
+                PDF 페이지 추출
+              </button>
             </div>
           </div>
 
