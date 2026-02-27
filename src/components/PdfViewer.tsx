@@ -49,6 +49,19 @@ const ZOOM_DEFAULT = 600
 const ZOOM_STEP = 25
 const ZOOM_DOUBLE_CLICK = 900
 
+function isClientPointInsideElement(
+  element: HTMLElement,
+  clientPoint: { x: number; y: number },
+): boolean {
+  const rect = element.getBoundingClientRect()
+  return (
+    clientPoint.x >= rect.left &&
+    clientPoint.x <= rect.right &&
+    clientPoint.y >= rect.top &&
+    clientPoint.y <= rect.bottom
+  )
+}
+
 function createPageSourceMap(pageCount: number): PageSourceMap {
   const map: PageSourceMap = {}
   for (let page = 1; page <= pageCount; page += 1) {
@@ -600,8 +613,17 @@ export function PdfViewer({ open, file, currentDir, onClose, onExtracted, onRena
     const handleWheel = (event: WheelEvent) => {
       const shouldZoom = event.ctrlKey || event.metaKey
       if (!shouldZoom) return
-      if (!container.contains(event.target as Node | null)) return
-      if (!pane || !pane.contains(event.target as Node | null)) return
+      if (!pane) return
+
+      const targetNode = event.target as Node | null
+      const targetInsideCard = targetNode ? container.contains(targetNode) : false
+      const targetInsidePane = targetNode ? pane.contains(targetNode) : false
+      const pointer = { x: event.clientX, y: event.clientY }
+      const pointerInsideCard = isClientPointInsideElement(container, pointer)
+      const pointerInsidePane = isClientPointInsideElement(pane, pointer)
+
+      if (!targetInsideCard && !pointerInsideCard) return
+      if (!targetInsidePane && !pointerInsidePane) return
 
       event.preventDefault()
       const delta = event.deltaY > 0 ? -ZOOM_STEP : ZOOM_STEP
@@ -920,6 +942,9 @@ export function PdfViewer({ open, file, currentDir, onClose, onExtracted, onRena
                     onClick={(event) => {
                       togglePage(pageNumber, { shift: event.shiftKey, ctrl: event.ctrlKey || event.metaKey })
                       scrollToPage(pageNumber)
+                    }}
+                    onDoubleClick={(event) => {
+                      toggleZoomWithAnchor({ clientX: event.clientX, clientY: event.clientY })
                     }}
                     onKeyDown={(e) => {
                       if (e.key === 'Enter' || e.key === ' ') {
