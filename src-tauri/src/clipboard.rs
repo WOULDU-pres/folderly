@@ -1,9 +1,11 @@
 use serde::{Deserialize, Serialize};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use tauri::{AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder};
 
 pub const SHARED_CLIPBOARD_EVENT: &str = "app://shared-clipboard-updated";
 const SECONDARY_WINDOW_LABEL: &str = "secondary";
+static SECONDARY_WINDOW_OPENING: AtomicBool = AtomicBool::new(false);
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -65,15 +67,40 @@ pub fn open_second_window(app: AppHandle) -> Result<String, String> {
         return Ok(SECONDARY_WINDOW_LABEL.to_string());
     }
 
-    WebviewWindowBuilder::new(&app, SECONDARY_WINDOW_LABEL, WebviewUrl::default())
+    if !SECONDARY_WINDOW_OPENING
+        .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+        .is_ok()
+    {
+        return Ok(SECONDARY_WINDOW_LABEL.to_string());
+    }
+
+    let build = WebviewWindowBuilder::new(&app, SECONDARY_WINDOW_LABEL, WebviewUrl::default())
         .title("Windows PDF Directory Explorer (Window 2)")
         .inner_size(1480.0, 860.0)
         .min_inner_size(1160.0, 640.0)
         .resizable(true)
-        .build()
-        .map_err(|err| format!("failed opening second window: {err}"))?;
+        .build();
 
-    Ok(SECONDARY_WINDOW_LABEL.to_string())
+    SECONDARY_WINDOW_OPENING.store(false, Ordering::Release);
+
+    match build {
+        Ok(window) => {
+            let _ = window.show();
+            let _ = window.unminimize();
+            let _ = window.set_focus();
+            Ok(SECONDARY_WINDOW_LABEL.to_string())
+        }
+        Err(err) => {
+            if let Some(window) = app.get_webview_window(SECONDARY_WINDOW_LABEL) {
+                let _ = window.show();
+                let _ = window.unminimize();
+                let _ = window.set_focus();
+                Ok(SECONDARY_WINDOW_LABEL.to_string())
+            } else {
+                Err(format!("failed opening second window: {err}"))
+            }
+        }
+    }
 }
 
 fn set_shared_clipboard_internal(

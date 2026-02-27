@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState, type DragEvent as ReactDragEvent,
 import { convertFileSrc, invoke } from '@tauri-apps/api/core'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import { getCurrentWindow } from '@tauri-apps/api/window'
+import { startDrag as startNativeDrag } from '@crabnebula/tauri-plugin-drag'
 import {
   DndContext,
   DragOverlay,
@@ -64,9 +65,15 @@ const FOLDER_PAGE_SIZE = 300
 const ENTRY_PAGE_SIZE = 300
 const SHARED_CLIPBOARD_EVENT = 'app://shared-clipboard-updated'
 const SHARED_CLIPBOARD_LOCAL_KEY = 'explorer.sharedClipboard.v1'
+const NATIVE_DRAG_PREVIEW_ICON = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADElEQVR42mP4z8DwHwAFAAH/tkY6rQAAAABJRU5ErkJggg=='
 type SortField = 'name' | 'modifiedAt' | 'size'
 type SortDirection = 'asc' | 'desc'
 const SOURCE_FOLDER_BADGE_COLORS = ['#2563eb', '#16a34a', '#ca8a04', '#db2777', '#7c3aed', '#0891b2', '#f97316', '#0d9488', '#0284c7', '#6366f1']
+type PathOperationMode = 'copy' | 'move'
+type NativeDragContext = {
+  paths: string[]
+  mode: PathOperationMode
+}
 
 type SourceFolderHint = {
   id: string
@@ -93,6 +100,34 @@ function toSortMode(field: SortField, direction: SortDirection): SortMode {
   if (field === 'name') return direction === 'asc' ? 'name' : 'nameDesc'
   if (field === 'modifiedAt') return direction === 'asc' ? 'modifiedAtAsc' : 'modifiedAt'
   return 'size'
+}
+
+function isTauriDesktopRuntime(): boolean {
+  if (typeof window === 'undefined') return false
+  return '__TAURI_INTERNALS__' in window || '__TAURI__' in window
+}
+
+function areSamePathSet(leftPaths: string[], rightPaths: string[]): boolean {
+  if (leftPaths.length !== rightPaths.length) return false
+  const left = new Set(leftPaths)
+  for (const path of rightPaths) {
+    if (!left.has(path)) {
+      return false
+    }
+  }
+  return true
+}
+
+function resolveDropPathFromWindowPosition(position: { x: number; y: number }): string | null {
+  if (typeof window === 'undefined' || typeof document === 'undefined') return null
+  const scale = window.devicePixelRatio || 1
+  const logicalX = position.x / scale
+  const logicalY = position.y / scale
+  const target = document.elementFromPoint(logicalX, logicalY)
+  if (!target) return null
+  const dropElement = target.closest<HTMLElement>('[data-drop-path]')
+  const value = dropElement?.dataset.dropPath?.trim()
+  return value || null
 }
 
 type SortableFolderRowProps = {
@@ -302,6 +337,7 @@ function SortableFolderRow({
     <li
       ref={setNodeRef}
       style={style}
+      data-drop-path={folder.path}
       className={`sidebar-row ${selected ? 'selected' : ''} ${folder.isHidden ? 'hidden-entry' : ''} ${dropTargetActive ? 'drop-target' : ''}`}
       role="option"
       aria-selected={selected}
@@ -381,6 +417,7 @@ type SortableEntryRowProps = {
   onSelect: (entry: ExplorerEntry, modifiers: SelectModifiers) => void
   onOpen: (entry: ExplorerEntry) => void
   onDropEntries: (paths: string[], destinationPath: string, copyMode: boolean) => void
+  onStartNativeDrag?: (paths: string[], copyMode: boolean) => boolean
   onInlineRenameChange: (value: string) => void
   onInlineRenameCommit: () => void
   onInlineRenameCancel: () => void
@@ -407,6 +444,7 @@ function SortableEntryRow({
   onSelect,
   onOpen,
   onDropEntries,
+  onStartNativeDrag,
   onInlineRenameChange,
   onInlineRenameCommit,
   onInlineRenameCancel,
@@ -465,8 +503,15 @@ function SortableEntryRow({
           event.preventDefault()
           return
         }
-        writeDragPayload(event, selected && dragPaths.length > 0 ? dragPaths : [entry.path])
+        const payloadPaths = selected && dragPaths.length > 0 ? dragPaths : [entry.path]
+        const copyMode = event.ctrlKey || event.metaKey
+        if (onStartNativeDrag?.(payloadPaths, copyMode)) {
+          event.preventDefault()
+          return
+        }
+        writeDragPayload(event, payloadPaths)
       }}
+      data-drop-path={entry.kind === 'folder' ? entry.path : undefined}
       onDragOver={(event) => {
         if (entry.kind === 'folder') {
           event.preventDefault()
@@ -615,6 +660,7 @@ type SortableGalleryCardProps = {
   onSelect: (entry: ExplorerEntry, modifiers: SelectModifiers) => void
   onOpen: (entry: ExplorerEntry) => void
   onDropEntries: (paths: string[], destinationPath: string, copyMode: boolean) => void
+  onStartNativeDrag?: (paths: string[], copyMode: boolean) => boolean
   onStartInlineRename: (entry: ExplorerEntry) => void
   onInlineRenameChange: (value: string) => void
   onInlineRenameCommit: () => void
@@ -636,6 +682,7 @@ function SortableGalleryCard({
   onSelect,
   onOpen,
   onDropEntries,
+  onStartNativeDrag,
   onStartInlineRename,
   onInlineRenameChange,
   onInlineRenameCommit,
@@ -674,8 +721,15 @@ function SortableGalleryCard({
           event.preventDefault()
           return
         }
-        writeDragPayload(event, selected && dragPaths.length > 0 ? dragPaths : [entry.path])
+        const payloadPaths = selected && dragPaths.length > 0 ? dragPaths : [entry.path]
+        const copyMode = event.ctrlKey || event.metaKey
+        if (onStartNativeDrag?.(payloadPaths, copyMode)) {
+          event.preventDefault()
+          return
+        }
+        writeDragPayload(event, payloadPaths)
       }}
+      data-drop-path={entry.kind === 'folder' ? entry.path : undefined}
       onDragOver={(event) => {
         if (entry.kind === 'folder') {
           event.preventDefault()
@@ -990,6 +1044,7 @@ export default function App() {
   const clickTimerRef = useRef<number | null>(null)
   const operationToastTimerRef = useRef<number | null>(null)
   const undoToastTimerRef = useRef<number | null>(null)
+  const nativeDragContextRef = useRef<NativeDragContext | null>(null)
 
   const {
     currentPath, setCurrentPath,
@@ -1051,6 +1106,7 @@ export default function App() {
   const [visibleFolderCount, setVisibleFolderCount] = useState(FOLDER_PAGE_SIZE)
   const [visibleEntryCount, setVisibleEntryCount] = useState(ENTRY_PAGE_SIZE)
   const [undoToastMessage, setUndoToastMessage] = useState<string | null>(null)
+  const [isOpeningSecondaryWindow, setIsOpeningSecondaryWindow] = useState(false)
 
   const sortedFolders = useMemo(() => sortFolders(folders, sortMode), [folders, sortMode])
   const displayFolders = useMemo(
@@ -1208,6 +1264,7 @@ export default function App() {
   }, [entryById, selectedEntryIds])
 
   const selectedFile = lastSelectedEntry?.kind === 'file' ? lastSelectedEntry : null
+  const isPdfViewerOpen = pdfModalOpen && selectedFile?.ext?.toLowerCase() === 'pdf'
   const previewPdfFiles = useMemo<FileItem[]>(
     () =>
       orderedEntries
@@ -1581,11 +1638,41 @@ export default function App() {
     })
   }
 
+  function tryStartNativeFileDrag(paths: string[], copyMode: boolean): boolean {
+    if (!isTauriDesktopRuntime()) return false
+    if (nativeDragContextRef.current) return false
+
+    const normalizedPaths = normalizeDragPaths(paths)
+    if (!normalizedPaths.length) return false
+
+    const mode: PathOperationMode = copyMode ? 'copy' : 'move'
+    nativeDragContextRef.current = { paths: normalizedPaths, mode }
+
+    void startNativeDrag({
+      item: normalizedPaths,
+      icon: NATIVE_DRAG_PREVIEW_ICON,
+      mode,
+    })
+      .catch(() => {
+        // no-op
+      })
+      .finally(() => {
+        nativeDragContextRef.current = null
+      })
+
+    return true
+  }
+
   async function openSecondaryWindow() {
+    if (isOpeningSecondaryWindow) return
+
+    setIsOpeningSecondaryWindow(true)
     try {
       await invoke('open_second_window')
     } catch (error) {
       setError(resolveErrorMessage(error, '두 번째 창을 열지 못했습니다.'))
+    } finally {
+      setIsOpeningSecondaryWindow(false)
     }
   }
 
@@ -1877,6 +1964,12 @@ export default function App() {
   }
 
   useEffect(() => {
+    if (!pdfModalOpen && mergePdfModalOpen) {
+      setMergePdfModalOpen(false)
+    }
+  }, [pdfModalOpen, mergePdfModalOpen])
+
+  useEffect(() => {
     const handleResize = () => {
       const width = window.innerWidth
       const height = window.innerHeight
@@ -2166,9 +2259,23 @@ export default function App() {
     getCurrentWindow()
       .onDragDropEvent((event) => {
         if (event.payload.type !== 'drop') return
-        const target = previewPath || currentPath
+        const droppedPaths = normalizeDragPaths(event.payload.paths)
+        if (!droppedPaths.length) return
+
+        const dropPathFromPoint = resolveDropPathFromWindowPosition({
+          x: event.payload.position.x,
+          y: event.payload.position.y,
+        })
+        const target = dropPathFromPoint || previewPath || currentPath
         if (!target) return
-        void applyPathOperation(event.payload.paths, target, 'copy')
+
+        const nativeDragContext = nativeDragContextRef.current
+        const mode: PathOperationMode =
+          nativeDragContext && areSamePathSet(nativeDragContext.paths, droppedPaths)
+            ? nativeDragContext.mode
+            : 'copy'
+
+        void applyPathOperation(droppedPaths, target, mode)
       })
       .then((cleanup) => {
         unlisten = cleanup
@@ -2540,8 +2647,14 @@ export default function App() {
         <button className="win-btn" onClick={() => void handleRefresh()}>
           <RefreshCcw size={15} /> 새로 고침
         </button>
-        <button className="win-btn" onClick={() => void openSecondaryWindow()}>
-          <Monitor size={15} /> 새 창
+        <button
+          className="win-btn"
+          disabled={isOpeningSecondaryWindow}
+          onClick={() => void openSecondaryWindow()}
+          aria-busy={isOpeningSecondaryWindow}
+          title={isOpeningSecondaryWindow ? '새 창을 여는 중입니다.' : '새 창'}
+        >
+          <Monitor size={15} /> {isOpeningSecondaryWindow ? '열기 중...' : '새 창'}
         </button>
 
         <div className="sort-controls" aria-label="정렬 옵션">
@@ -2645,6 +2758,7 @@ export default function App() {
               <li key={drive.id} role="option" aria-selected={currentPath.startsWith(drive.path)}>
                 <button
                   className={`drive-btn ${currentPath.startsWith(drive.path) ? 'active' : ''}`}
+                  data-drop-path={drive.path}
                   onClick={() => void navigateToPath(drive.path)}
                   onDragOver={(event) => event.preventDefault()}
                   onDrop={(event) => {
@@ -2668,6 +2782,7 @@ export default function App() {
                   <li key={item.id}>
                     <button
                       className={`drive-btn ${(previewPath || currentPath) === item.path ? 'active' : ''}`}
+                      data-drop-path={item.path}
                       onClick={() => void navigateToPath(item.path)}
                     >
                       {item.id === 'quick:desktop' ? <Monitor size={15} /> : <FolderDown size={15} />} {item.label}
@@ -2725,6 +2840,7 @@ export default function App() {
 
         <section
           className="content-pane"
+          data-drop-path={previewPath || currentPath || undefined}
           onDragOver={(event) => {
             if (!hasExplorerDragPayload(event)) return
             event.preventDefault()
@@ -2762,21 +2878,25 @@ export default function App() {
               드래그 기본 동작: 이동 (Ctrl/Cmd를 누르면 복사)
             </p>
             <div className="pane-actions">
-              <button
-                className="win-btn"
-                style={{ borderColor: 'var(--border)' }}
-                disabled={previewPdfFiles.length < 2}
-                onClick={() => setMergePdfModalOpen(true)}
-              >
-                PDF 병합
-              </button>
-              <button
-                className="win-btn primary"
-                disabled={selectedFile?.ext.toLowerCase() !== 'pdf'}
-                onClick={() => setPdfModalOpen(true)}
-              >
-                PDF 페이지 추출
-              </button>
+              {isPdfViewerOpen && (
+                <>
+                  <button
+                    className="win-btn"
+                    style={{ borderColor: 'var(--border)' }}
+                    disabled={previewPdfFiles.length < 2}
+                    onClick={() => setMergePdfModalOpen(true)}
+                  >
+                    PDF 병합
+                  </button>
+                  <button
+                    className="win-btn primary"
+                    disabled={!isPdfViewerOpen}
+                    onClick={() => setPdfModalOpen(true)}
+                  >
+                    PDF 페이지 추출
+                  </button>
+                </>
+              )}
             </div>
           </div>
 
@@ -2842,6 +2962,7 @@ export default function App() {
                           onDropEntries={(paths, destinationPath, copyMode) =>
                             void applyPathOperation(paths, destinationPath, copyMode ? 'copy' : 'move')
                           }
+                          onStartNativeDrag={tryStartNativeFileDrag}
                           canExpand={folderToggleState.canExpand}
                           isExpanded={folderToggleState.isExpanded}
                           isLoadingChildren={folderToggleState.isLoadingChildren}
@@ -2915,6 +3036,7 @@ export default function App() {
                         onDropEntries={(paths, destinationPath, copyMode) =>
                           void applyPathOperation(paths, destinationPath, copyMode ? 'copy' : 'move')
                         }
+                        onStartNativeDrag={tryStartNativeFileDrag}
                         onStartInlineRename={beginInlineRename}
                         onInlineRenameChange={setInlineRenameValue}
                         onInlineRenameCommit={() => void commitInlineRename()}
