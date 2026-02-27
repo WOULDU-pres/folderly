@@ -227,7 +227,11 @@ pub fn merge_pdf_pages(
 
         let page_map = doc.get_pages();
         if page_map.is_empty() {
-            warnings.push(format!("Source #{} ({}) has no pages, skipping.", idx + 1, source.path));
+            warnings.push(format!(
+                "Source #{} ({}) has no pages, skipping.",
+                idx + 1,
+                source.path
+            ));
             continue;
         }
 
@@ -322,11 +326,7 @@ fn merge_document_pages(base: &mut Document, donor: &Document, warnings: &mut Ve
     let base_pages_id = base
         .catalog()
         .ok()
-        .and_then(|cat| {
-            cat.get(b"Pages")
-                .ok()
-                .and_then(|p| p.as_reference().ok())
-        });
+        .and_then(|cat| cat.get(b"Pages").ok().and_then(|p| p.as_reference().ok()));
 
     let pages_root_id = match base_pages_id {
         Some(id) => id,
@@ -428,20 +428,14 @@ fn remap_object(
         Object::Dictionary(dict) => {
             let mut new_dict = lopdf::Dictionary::new();
             for (key, val) in dict.iter() {
-                new_dict.set(
-                    key.clone(),
-                    remap_object(base, donor, val, id_map),
-                );
+                new_dict.set(key.clone(), remap_object(base, donor, val, id_map));
             }
             Object::Dictionary(new_dict)
         }
         Object::Stream(stream) => {
             let mut new_dict = lopdf::Dictionary::new();
             for (key, val) in stream.dict.iter() {
-                new_dict.set(
-                    key.clone(),
-                    remap_object(base, donor, val, id_map),
-                );
+                new_dict.set(key.clone(), remap_object(base, donor, val, id_map));
             }
             Object::Stream(lopdf::Stream::new(new_dict, stream.content.clone()))
         }

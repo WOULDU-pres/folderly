@@ -278,13 +278,18 @@ pub fn restore_paths_from_trash(paths: Vec<String>) -> Result<Vec<String>, Strin
 
     #[cfg(any(
         target_os = "windows",
-        all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android"))
+        all(
+            unix,
+            not(target_os = "macos"),
+            not(target_os = "ios"),
+            not(target_os = "android")
+        )
     ))]
     {
         use trash::os_limited;
 
-        let mut trash_items = os_limited::list()
-            .map_err(|err| format!("failed listing trash items: {err}"))?;
+        let mut trash_items =
+            os_limited::list().map_err(|err| format!("failed listing trash items: {err}"))?;
         trash_items.sort_by(|left, right| right.time_deleted.cmp(&left.time_deleted));
 
         let mut selected = Vec::new();
@@ -313,7 +318,12 @@ pub fn restore_paths_from_trash(paths: Vec<String>) -> Result<Vec<String>, Strin
 
     #[cfg(not(any(
         target_os = "windows",
-        all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android"))
+        all(
+            unix,
+            not(target_os = "macos"),
+            not(target_os = "ios"),
+            not(target_os = "android")
+        )
     )))]
     {
         Err("restore from trash is unsupported on this platform".to_string())
@@ -1482,7 +1492,12 @@ mod tests {
 
     #[cfg(any(
         target_os = "windows",
-        all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android"))
+        all(
+            unix,
+            not(target_os = "macos"),
+            not(target_os = "ios"),
+            not(target_os = "android")
+        )
     ))]
     #[test]
     fn restore_paths_from_trash_restores_deleted_file() {
@@ -1494,8 +1509,8 @@ mod tests {
         delete_paths(vec![original_path.clone()]).expect("delete path");
         assert!(!target_file.exists());
 
-        let restored = restore_paths_from_trash(vec![original_path.clone()])
-            .expect("restore from trash");
+        let restored =
+            restore_paths_from_trash(vec![original_path.clone()]).expect("restore from trash");
         assert_eq!(restored, vec![original_path]);
         assert!(target_file.exists());
     }

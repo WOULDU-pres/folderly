@@ -5,6 +5,7 @@
   "windows": ["main", "secondary"],
   "permissions": [
     "core:default",
-    "opener:default"
+    "opener:default",
+    "drag:default"
   ]
 }

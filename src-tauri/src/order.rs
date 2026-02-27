@@ -69,7 +69,13 @@ pub fn save_manual_order(parent_path: String, ordered_ids: Vec<String>) -> Resul
     }
 
     let mut connection = open_db()?;
-    save_manual_order_with_conn(&mut connection, "folder_manual_order", "folder_id", normalized_parent, &ordered_ids)
+    save_manual_order_with_conn(
+        &mut connection,
+        "folder_manual_order",
+        "folder_id",
+        normalized_parent,
+        &ordered_ids,
+    )
 }
 
 #[tauri::command]
@@ -80,7 +86,12 @@ pub fn load_manual_order(parent_path: String) -> Result<Vec<String>, String> {
     }
 
     let connection = open_db()?;
-    load_manual_order_with_conn(&connection, "folder_manual_order", "folder_id", normalized_parent)
+    load_manual_order_with_conn(
+        &connection,
+        "folder_manual_order",
+        "folder_id",
+        normalized_parent,
+    )
 }
 
 #[tauri::command]
@@ -91,7 +102,13 @@ pub fn save_file_manual_order(parent_path: String, ordered_ids: Vec<String>) -> 
     }
 
     let mut connection = open_db()?;
-    save_manual_order_with_conn(&mut connection, "file_manual_order", "file_id", normalized_parent, &ordered_ids)
+    save_manual_order_with_conn(
+        &mut connection,
+        "file_manual_order",
+        "file_id",
+        normalized_parent,
+        &ordered_ids,
+    )
 }
 
 #[tauri::command]
@@ -102,7 +119,12 @@ pub fn load_file_manual_order(parent_path: String) -> Result<Vec<String>, String
     }
 
     let connection = open_db()?;
-    load_manual_order_with_conn(&connection, "file_manual_order", "file_id", normalized_parent)
+    load_manual_order_with_conn(
+        &connection,
+        "file_manual_order",
+        "file_id",
+        normalized_parent,
+    )
 }
 
 fn save_manual_order_with_conn(
@@ -352,8 +374,14 @@ mod tests {
         )
         .expect("load files");
 
-        assert_eq!(folder_loaded, vec!["folder-a".to_string(), "folder-b".to_string()]);
-        assert_eq!(file_loaded, vec!["file-2".to_string(), "file-1".to_string()]);
+        assert_eq!(
+            folder_loaded,
+            vec!["folder-a".to_string(), "folder-b".to_string()]
+        );
+        assert_eq!(
+            file_loaded,
+            vec!["file-2".to_string(), "file-1".to_string()]
+        );
     }
 
     #[test]

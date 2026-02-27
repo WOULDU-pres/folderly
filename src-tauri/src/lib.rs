@@ -9,6 +9,7 @@ pub fn run() {
     tauri::Builder::default()
         .manage(clipboard::SharedClipboardState::default())
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_drag::init())
         .invoke_handler(tauri::generate_handler![
             clipboard::get_shared_clipboard,
             clipboard::set_shared_clipboard,
