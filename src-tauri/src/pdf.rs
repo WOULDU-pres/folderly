@@ -381,6 +381,9 @@ pub fn save_pdf_highlights(
     lines: Vec<SavePdfHighlightsLine>,
     overwrite: bool,
 ) -> Result<SavePdfHighlightsResult, String> {
+    const HIGHLIGHT_LINE_WIDTH: f32 = 9.0;
+    const HIGHLIGHT_OPACITY: f32 = 0.35;
+
     if lines.is_empty() {
         return Err("No highlights to save. Draw at least one line before saving.".to_string());
     }
@@ -430,7 +433,7 @@ pub fn save_pdf_highlights(
         };
 
         let color = parse_hex_color(&line.color)?;
-        let line_width = 3.0f32;
+        let line_width = HIGHLIGHT_LINE_WIDTH;
         let start_x = clamp((line.start.x * page_width).max(0.0), 0.0, page_width);
         let end_x = clamp((line.end.x * page_width).max(0.0), 0.0, page_width);
         let start_y = page_height - clamp(line.start.y * page_height, 0.0, page_height);
@@ -462,6 +465,8 @@ pub fn save_pdf_highlights(
                 Object::Real(end_y as f32),
             ],
         );
+        annotation.set("CA", Object::Real(HIGHLIGHT_OPACITY));
+        annotation.set("ca", Object::Real(HIGHLIGHT_OPACITY));
         annotation.set("BS", {
             let mut border_style = lopdf::Dictionary::new();
             border_style.set("Type", Object::Name(b"BS".to_vec()));

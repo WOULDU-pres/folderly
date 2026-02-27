@@ -1403,8 +1403,10 @@ select {
 
 .pdf-highlight-line {
   vector-effect: non-scaling-stroke;
-  stroke-width: 3;
+  stroke-width: 9;
+  stroke-opacity: 0.35;
   stroke-linecap: round;
+  mix-blend-mode: multiply;
 }
 
 .pdf-highlight-dot {

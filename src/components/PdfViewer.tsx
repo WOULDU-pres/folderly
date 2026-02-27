@@ -5,6 +5,8 @@ import { getFileDirectory, getFileNameWithoutExt, toCustomNamePdfPath, withPrese
 import {
   composePdfRotation,
   HIGHLIGHT_LINE_MARGIN,
+  HIGHLIGHT_STROKE_OPACITY,
+  HIGHLIGHT_STROKE_WIDTH,
   rotatePointFromCanonical,
   rotatePointToCanonical,
   toRelativePointFromRect,
@@ -58,6 +60,11 @@ type HighlightLine = {
   color: string
   start: NormalizedPoint
   end: NormalizedPoint
+}
+
+type HighlightHistoryEntry = {
+  id: string
+  page: number
 }
 
 const ZOOM_MIN = 200
@@ -221,6 +228,7 @@ export function PdfViewer({ open, file, currentDir, onClose, onExtracted, onRena
   const [pendingExtract, setPendingExtract] = useState<{ fileName: string; pages: number[] } | null>(null)
   const [highlightColor, setHighlightColor] = useState<string>(HIGHLIGHT_COLORS[0])
   const [highlightLines, setHighlightLines] = useState<Record<number, HighlightLine[]>>({})
+  const [highlightHistory, setHighlightHistory] = useState<HighlightHistoryEntry[]>([])
   const [savingHighlights, setSavingHighlights] = useState(false)
 
   // Internal file state - survives temporary null prop during rename/refresh
@@ -238,10 +246,15 @@ export function PdfViewer({ open, file, currentDir, onClose, onExtracted, onRena
   const pdfDocRef = useRef<PdfDocumentProxy | null>(null)
   const lastSelectedPageRef = useRef<number | null>(null)
   const thumbsRef = useRef<Record<number, string>>({})
+  const highlightHistoryRef = useRef<HighlightHistoryEntry[]>([])
 
   useEffect(() => {
     thumbsRef.current = thumbs
   }, [thumbs])
+
+  useEffect(() => {
+    highlightHistoryRef.current = highlightHistory
+  }, [highlightHistory])
 
   const remapPageDataAfterRemoval = useCallback((removedPages: number[]) => {
     if (!pageCount || removedPages.length === 0) return
@@ -299,6 +312,7 @@ export function PdfViewer({ open, file, currentDir, onClose, onExtracted, onRena
       setPendingScrollPage(null)
       setSelectedPages([])
       setHighlightLines({})
+      setHighlightHistory([])
       setPageDisplayRotations({})
       setRotation(0)
     }
@@ -393,6 +407,7 @@ export function PdfViewer({ open, file, currentDir, onClose, onExtracted, onRena
       if (!isSameSession) {
         setSelectedPages([])
         setHighlightLines({})
+        setHighlightHistory([])
         setPageDisplayRotations({})
       }
       lastSelectedPageRef.current = null
@@ -578,7 +593,56 @@ export function PdfViewer({ open, file, currentDir, onClose, onExtracted, onRena
   useEffect(() => {
     if (!open) return
 
+    const isEditableTarget = (target: EventTarget | null): boolean => {
+      if (!(target instanceof HTMLElement)) return false
+      if (target.isContentEditable) return true
+      const tagName = target.tagName.toLowerCase()
+      if (tagName === 'input' || tagName === 'textarea') return true
+      return Boolean(target.closest('[contenteditable=\"true\"]'))
+    }
+
+    const undoLastHighlight = (): boolean => {
+      const history = highlightHistoryRef.current
+      const last = history[history.length - 1]
+      if (!last) return false
+
+      setHighlightHistory((prev) => prev.slice(0, -1))
+      setHighlightLines((current) => {
+        const pageLines = current[last.page]
+        if (!pageLines?.length) return current
+
+        const nextPageLines = pageLines.filter((line) => line.id !== last.id)
+        if (nextPageLines.length === pageLines.length) return current
+        if (nextPageLines.length === 0) {
+          const { [last.page]: _removed, ...rest } = current
+          return rest
+        }
+
+        return {
+          ...current,
+          [last.page]: nextPageLines,
+        }
+      })
+      setError(null)
+      setErrorCause(null)
+      setSuccess('마지막 하이라이트를 취소했습니다.')
+      return true
+    }
+
     const handleKeyDown = (e: KeyboardEvent) => {
+      const isUndoShortcut = (e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === 'z'
+      if (isUndoShortcut) {
+        if (interactionLocked) return
+        if (fileNameModalOpen || renameModalOpen || pendingExtract) return
+        if (isEditableTarget(e.target)) return
+
+        if (undoLastHighlight()) {
+          e.preventDefault()
+          e.stopPropagation()
+        }
+        return
+      }
+
       if (e.key === 'Escape' && !fileNameModalOpen && !renameModalOpen && !pendingExtract && !interactionLocked) {
         onClose()
       }
@@ -790,6 +854,7 @@ export function PdfViewer({ open, file, currentDir, onClose, onExtracted, onRena
           [pageNumber]: [...existing, line],
         }
       })
+      setHighlightHistory((current) => [...current, { id: line.id, page: pageNumber }])
       setTimeout(() => {
         setActivePage(pageNumber)
         scrollToPage(pageNumber)
@@ -1055,6 +1120,7 @@ export function PdfViewer({ open, file, currentDir, onClose, onExtracted, onRena
             <span className="meta-pill">{Math.round(zoom / 6)}%</span>
             <button className="ghost" onClick={() => updateZoomWithAnchor(ZOOM_STEP)} disabled={interactionLocked}>+</button>
             <span className="meta-pill">Ctrl/Cmd+휠 · 더블클릭 줌</span>
+            <span className="meta-pill">Ctrl/Cmd+Z 하이라이트 취소</span>
 
             <button className="primary" onClick={handleExtractClick} disabled={!canExtract}>
               {extracting ? '추출 중...' : '선택 추출'}
@@ -1163,15 +1229,17 @@ export function PdfViewer({ open, file, currentDir, onClose, onExtracted, onRena
                             return (
                               <line
                                 key={line.id}
-                                x1={start.x * 100}
-                                y1={start.y * 100}
-                                x2={end.x * 100}
-                                y2={end.y * 100}
-                                className="pdf-highlight-line"
-                                stroke={line.color}
-                              />
-                            )
-                          })}
+                              x1={start.x * 100}
+                              y1={start.y * 100}
+                              x2={end.x * 100}
+                              y2={end.y * 100}
+                              className="pdf-highlight-line"
+                              stroke={line.color}
+                              strokeWidth={HIGHLIGHT_STROKE_WIDTH}
+                              strokeOpacity={HIGHLIGHT_STROKE_OPACITY}
+                            />
+                          )
+                        })}
                         </svg>
                       )}
                     </div>

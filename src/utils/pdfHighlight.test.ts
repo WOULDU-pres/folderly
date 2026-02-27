@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest'
 import {
   composePdfRotation,
   HIGHLIGHT_LINE_MARGIN,
+  HIGHLIGHT_STROKE_OPACITY,
+  HIGHLIGHT_STROKE_WIDTH,
   rotatePointFromCanonical,
   rotatePointToCanonical,
   toRelativePointFromRect,
@@ -67,5 +69,15 @@ describe('pdfHighlight rotation mapping', () => {
 
     const zeroSizePoint = toRelativePointFromRect(80, 170, { left: 30, top: 70, width: 0, height: 0 })
     expectPointClose(zeroSizePoint, { x: 0, y: 0 })
+  })
+
+  it('uses 80% coverage width with 10% side margins', () => {
+    const visibleWidthRatio = 1 - HIGHLIGHT_LINE_MARGIN * 2
+    expect(visibleWidthRatio).toBeCloseTo(0.8, 6)
+  })
+
+  it('uses 3x stroke width with semi-transparent opacity', () => {
+    expect(HIGHLIGHT_STROKE_WIDTH).toBe(9)
+    expect(HIGHLIGHT_STROKE_OPACITY).toBeCloseTo(0.35, 6)
   })
 })

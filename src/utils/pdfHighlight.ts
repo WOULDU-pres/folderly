@@ -3,7 +3,12 @@ export type NormalizedPoint = {
   y: number
 }
 
-export const HIGHLIGHT_LINE_MARGIN = 0.01
+// 10% margin on both sides => visible line spans 80% of page width
+export const HIGHLIGHT_LINE_MARGIN = 0.1
+// Previous highlight thickness was 3px; request is 3x wider.
+export const HIGHLIGHT_STROKE_WIDTH = 9
+// Keep text readable under marker strokes.
+export const HIGHLIGHT_STROKE_OPACITY = 0.35
 
 function normalizeQuarterTurnRotation(rotation: number): 0 | 90 | 180 | 270 {
   const normalized = ((rotation % 360) + 360) % 360
