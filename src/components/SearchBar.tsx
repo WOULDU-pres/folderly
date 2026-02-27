@@ -28,17 +28,18 @@ export function SearchBar({ value, onChange, placeholder = '파일 검색 (Ctrl+
         display: 'inline-flex',
         alignItems: 'center',
         gap: 6,
-        height: 34,
+        height: 36,
         borderRadius: 8,
         border: '1px solid var(--border, #e1e4ea)',
         background: 'var(--bg-pane, #ffffff)',
-        padding: '0 8px',
-        minWidth: 132,
-        maxWidth: 260,
-        flex: '1 1 180px',
+        padding: '0 10px',
+        minWidth: 160,
+        maxWidth: 300,
+        flex: '1 1 210px',
+        fontSize: 14,
       }}
     >
-      <Search size={14} style={{ color: 'var(--muted, #5d636f)', flexShrink: 0 }} />
+      <Search size={16} style={{ color: 'var(--muted, #5d636f)', flexShrink: 0 }} />
       <input
         ref={inputRef}
         type="text"
@@ -51,7 +52,7 @@ export function SearchBar({ value, onChange, placeholder = '파일 검색 (Ctrl+
           background: 'transparent',
           outline: 'none',
           font: 'inherit',
-          fontSize: 13,
+          fontSize: 15,
           color: 'var(--text, #1f1f1f)',
           flex: 1,
           minWidth: 0,
@@ -72,7 +73,7 @@ export function SearchBar({ value, onChange, placeholder = '파일 검색 (Ctrl+
             color: 'var(--muted, #5d636f)',
           }}
         >
-          <X size={14} />
+          <X size={15} />
         </button>
       )}
     </div>

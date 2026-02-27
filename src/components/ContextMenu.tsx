@@ -70,14 +70,14 @@ export function ContextMenu({ open, x, y, items, onClose }: ContextMenuProps) {
         left: x,
         top: y,
         zIndex: 50,
-        minWidth: 200,
+        minWidth: 220,
         background: 'var(--bg-pane, #ffffff)',
         border: '1px solid var(--border, #e1e4ea)',
         borderRadius: 8,
         boxShadow: '0 8px 24px rgba(0, 0, 0, 0.12)',
         padding: '4px 0',
         fontFamily: 'inherit',
-        fontSize: 13,
+        fontSize: 14,
       }}
     >
       {items.map((item, i) => (
@@ -94,7 +94,7 @@ export function ContextMenu({ open, x, y, items, onClose }: ContextMenuProps) {
             alignItems: 'center',
             gap: 8,
             width: '100%',
-            padding: '7px 12px',
+            padding: '8px 12px',
             border: 'none',
             background: 'transparent',
             color: item.danger ? 'var(--danger, #b4232f)' : item.disabled ? 'var(--muted, #999)' : 'var(--text, #1f1f1f)',
@@ -112,7 +112,7 @@ export function ContextMenu({ open, x, y, items, onClose }: ContextMenuProps) {
         >
           {item.icon && <span style={{ display: 'inline-flex', width: 16, justifyContent: 'center' }}>{item.icon}</span>}
           <span style={{ flex: 1 }}>{item.label}</span>
-          {item.shortcut && <span style={{ color: 'var(--muted, #999)', fontSize: 11 }}>{item.shortcut}</span>}
+          {item.shortcut && <span style={{ color: 'var(--muted, #999)', fontSize: 12 }}>{item.shortcut}</span>}
         </button>
       ))}
     </div>

@@ -7,6 +7,7 @@ import {
   toCustomNamePdfPath,
   toMergedPdfPath,
   toOutputPdfPath,
+  withPreservedExtension,
 } from './path'
 
 describe('path utils edge cases', () => {
@@ -27,6 +28,16 @@ describe('path utils edge cases', () => {
   it('sanitizes custom PDF names with separators or empty input', () => {
     expect(toCustomNamePdfPath('/tmp', 'report/2026')).toBe('/tmp/report_2026.pdf')
     expect(toCustomNamePdfPath('/tmp', '  ')).toBe('/tmp/output.pdf')
+  })
+
+  it('locks extension to the reference file extension', () => {
+    expect(toCustomNamePdfPath('/tmp', 'report', 'summary.txt')).toBe('/tmp/report.txt')
+    expect(toCustomNamePdfPath('/tmp', 'final.docx', 'summary.txt')).toBe('/tmp/final.txt')
+  })
+
+  it('keeps original extension for rename helper even when user edits extension text', () => {
+    expect(withPreservedExtension('summary', '기본.pdf')).toBe('summary.pdf')
+    expect(withPreservedExtension('summary.docx', '기본.pdf')).toBe('summary.pdf')
   })
 
   it('builds output and merged pdf paths for root directories', () => {

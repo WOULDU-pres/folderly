@@ -1,9 +1,10 @@
-import { KeyboardEvent as ReactKeyboardEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import { ExtractAndRemoveResult, ExtractResult, FileItem } from '../types'
-import { getFileDirectory, getFileNameWithoutExt, toCustomNamePdfPath } from '../utils/path'
+import { getFileDirectory, getFileNameWithoutExt, toCustomNamePdfPath, withPreservedExtension } from '../utils/path'
 import { FileNameModal } from './FileNameModal'
 import { ProgressBar } from './ProgressBar'
+import { PDF_EXTRACT_KEYWORD_SUGGESTIONS } from '../utils/keywordSuggestion'
 
 import * as pdfjs from 'pdfjs-dist/legacy/build/pdf.mjs'
 
@@ -191,6 +192,13 @@ export function PdfViewer({ open, file, currentDir, onClose, onExtracted, onRena
   const pendingExtractPrimaryRef = useRef<HTMLButtonElement>(null)
   const observerRef = useRef<IntersectionObserver | null>(null)
   const pdfDocRef = useRef<PdfDocumentProxy | null>(null)
+  const lastSelectedPageRef = useRef<number | null>(null)
+  const thumbsRef = useRef<Record<number, string>>({})
+  const lastLoadedFilePathRef = useRef<string | null>(null)
+
+  useEffect(() => {
+    thumbsRef.current = thumbs
+  }, [thumbs])
 
   const remapPageDataAfterRemoval = useCallback((removedPages: number[]) => {
     if (!pageCount || removedPages.length === 0) return
@@ -237,7 +245,9 @@ export function PdfViewer({ open, file, currentDir, onClose, onExtracted, onRena
     }
     if (!open) {
       setViewerFile(null)
+      lastSelectedPageRef.current = null
       setPendingScrollPage(null)
+      setSelectedPages([])
     }
   }, [open, file])
 
@@ -300,13 +310,18 @@ export function PdfViewer({ open, file, currentDir, onClose, onExtracted, onRena
     let cancelled = false
 
     async function loadPdf() {
+      const canReuseThumbs = lastLoadedFilePathRef.current === targetFile.path && Object.keys(thumbsRef.current).length > 0
       setLoading(true)
       setError(null)
       setErrorCause(null)
       setSuccess(null)
-      setThumbs({})
+      if (!canReuseThumbs) {
+        setThumbs({})
+        thumbsRef.current = {}
+      }
       setLargePreviews({})
       setSelectedPages([])
+      lastSelectedPageRef.current = null
       setActivePage(1)
       setFileNameModalOpen(false)
       setPendingExtract(null)
@@ -329,8 +344,21 @@ export function PdfViewer({ open, file, currentDir, onClose, onExtracted, onRena
         pageSourceMapRef.current = createPageSourceMap(pdfDocument.numPages)
         setPageCount(pdfDocument.numPages)
 
+        if (canReuseThumbs) {
+          const nextThumbs: Record<number, string> = {}
+          for (let page = 1; page <= pdfDocument.numPages; page += 1) {
+            const existingThumb = thumbsRef.current[page]
+            if (existingThumb) {
+              nextThumbs[page] = existingThumb
+            }
+          }
+          thumbsRef.current = nextThumbs
+          setThumbs(nextThumbs)
+        }
+
         for (let pageNumber = 1; pageNumber <= pdfDocument.numPages; pageNumber += 1) {
           if (cancelled) break
+          if (thumbsRef.current[pageNumber]) continue
           const page = await pdfDocument.getPage(pageNumber)
           const viewport = page.getViewport({ scale: 0.35 })
           const canvas = window.document.createElement('canvas')
@@ -343,8 +371,12 @@ export function PdfViewer({ open, file, currentDir, onClose, onExtracted, onRena
           await page.render({ canvasContext: context, viewport }).promise
           if (cancelled) break
 
-          setThumbs((prev) => ({ ...prev, [pageNumber]: canvas.toDataURL('image/png') }))
+          const renderedThumb = canvas.toDataURL('image/png')
+          thumbsRef.current = { ...thumbsRef.current, [pageNumber]: renderedThumb }
+          setThumbs((prev) => ({ ...prev, [pageNumber]: renderedThumb }))
         }
+
+        lastLoadedFilePathRef.current = targetFile.path
       } catch (e) {
         if (!cancelled) {
           setResolvedError(e, 'PDF 미리보기에 실패했습니다.')
@@ -364,6 +396,7 @@ export function PdfViewer({ open, file, currentDir, onClose, onExtracted, onRena
       }
       setThumbs({})
       setLargePreviews({})
+      thumbsRef.current = {}
       pageSourceMapRef.current = {}
     }
   }, [open, viewerFile?.path, loadVersion, setResolvedError])
@@ -470,19 +503,32 @@ export function PdfViewer({ open, file, currentDir, onClose, onExtracted, onRena
     return () => window.cancelAnimationFrame(raf)
   }, [pendingExtract])
 
-  const handlePendingExtractKeyDown = useCallback((event: ReactKeyboardEvent<HTMLDivElement>) => {
-    if (interactionLocked) return
-    if (event.key === 'Escape') {
-      setPendingExtract(null)
-      return
-    }
-    if (event.key === 'Enter') {
-      event.preventDefault()
-      if (pendingExtract) {
+  useEffect(() => {
+    if (!pendingExtract || !open) return
+    const handlePendingExtractShortcut = (event: KeyboardEvent) => {
+      if (interactionLocked) return
+      if (event.key === 'Escape') {
+        event.preventDefault()
+        event.stopPropagation()
+        setPendingExtract(null)
+        return
+      }
+      if (
+        event.key === 'Enter'
+        && !event.shiftKey
+        && !event.ctrlKey
+        && !event.metaKey
+        && !event.altKey
+      ) {
+        event.preventDefault()
+        event.stopPropagation()
         void doExtract(pendingExtract.fileName, pendingExtract.pages, true)
       }
     }
-  }, [doExtract, interactionLocked, pendingExtract])
+
+    window.addEventListener('keydown', handlePendingExtractShortcut, true)
+    return () => window.removeEventListener('keydown', handlePendingExtractShortcut, true)
+  }, [pendingExtract, open, interactionLocked, doExtract])
 
   const viewerCardRef = useRef<HTMLDivElement>(null)
 
@@ -505,16 +551,6 @@ export function PdfViewer({ open, file, currentDir, onClose, onExtracted, onRena
     document.addEventListener('wheel', handleWheel, { passive: false, capture: true })
     return () => document.removeEventListener('wheel', handleWheel, { capture: true })
   }, [open, interactionLocked])
-
-  const togglePage = (page: number) => {
-    if (interactionLocked) return
-    setSelectedPages((prev) => {
-      if (prev.includes(page)) {
-        return prev.filter((p) => p !== page)
-      }
-      return [...prev, page]
-    })
-  }
 
   const selectAll = () => {
     if (interactionLocked) return
@@ -554,6 +590,54 @@ export function PdfViewer({ open, file, currentDir, onClose, onExtracted, onRena
     [selectedPages],
   )
 
+  const getRangePages = useCallback((start: number, end: number): number[] => {
+    if (start > end) {
+      const temp = start
+      start = end
+      end = temp
+    }
+    const range: number[] = []
+    for (let page = start; page <= end; page += 1) {
+      range.push(page)
+    }
+    return range
+  }, [])
+
+  const clearAndSetSelection = (pages: number[]) => {
+    const deduped = [...new Set(pages)]
+    deduped.sort((a, b) => a - b)
+    setSelectedPages(deduped)
+  }
+
+  const togglePage = (page: number, modifiers?: { shift?: boolean; ctrl?: boolean }) => {
+    if (interactionLocked) return
+    const hasShift = !!modifiers?.shift
+    const hasCtrl = !!modifiers?.ctrl
+
+    if (hasShift && lastSelectedPageRef.current !== null) {
+      const rangePages = getRangePages(lastSelectedPageRef.current, page)
+      if (hasCtrl) {
+        setSelectedPages((prev) => {
+          const nextSet = new Set(prev)
+          rangePages.forEach((p) => nextSet.add(p))
+          const next = [...nextSet]
+          next.sort((a, b) => a - b)
+          return next
+        })
+      } else {
+        clearAndSetSelection(rangePages)
+      }
+    } else if (hasShift) {
+      setSelectedPages((prev) => (prev.includes(page) ? prev.filter((p) => p !== page) : [...prev, page]))
+    } else if (hasCtrl) {
+      setSelectedPages((prev) => (prev.includes(page) ? prev.filter((p) => p !== page) : [...prev, page]))
+    } else {
+      setSelectedPages([page])
+    }
+
+    lastSelectedPageRef.current = page
+  }
+
   const canExtract = selectedPages.length > 0 && !!viewerFile && !loading && !interactionLocked
 
   const selectedCountLabel = useMemo(() => `${selectedPages.length}/${pageCount} 선택`, [selectedPages.length, pageCount])
@@ -589,7 +673,7 @@ export function PdfViewer({ open, file, currentDir, onClose, onExtracted, onRena
 
     try {
       const dir = currentDir || getFileDirectory(viewerFile.path)
-      const outputPath = toCustomNamePdfPath(dir, fileName)
+      const outputPath = toCustomNamePdfPath(dir, fileName, defaultExtractName)
 
       if (destructive) {
         const totalPagesBeforeExtract = pageCount > 0 ? pageCount : Math.max(activePage, ...sortedPages)
@@ -643,7 +727,7 @@ export function PdfViewer({ open, file, currentDir, onClose, onExtracted, onRena
     setError(null)
     setErrorCause(null)
     try {
-      const finalName = newName.toLowerCase().endsWith('.pdf') ? newName : `${newName}.pdf`
+      const finalName = withPreservedExtension(newName, viewerFile.name)
       const oldPath = viewerFile.path
       const newPath = await invoke<string>('rename_path', { path: oldPath, newName: finalName })
 
@@ -730,8 +814,8 @@ export function PdfViewer({ open, file, currentDir, onClose, onExtracted, onRena
                     role="option"
                     aria-selected={selected}
                     aria-label={`페이지 ${pageNumber}`}
-                    onClick={() => {
-                      togglePage(pageNumber)
+                    onClick={(event) => {
+                      togglePage(pageNumber, { shift: event.shiftKey, ctrl: event.ctrlKey || event.metaKey })
                       scrollToPage(pageNumber)
                     }}
                     onKeyDown={(e) => {
@@ -769,6 +853,17 @@ export function PdfViewer({ open, file, currentDir, onClose, onExtracted, onRena
                     ref={(el) => { largePageRefs.current[pageNumber] = el }}
                     className={`pdf-large-page ${selected ? 'selected' : ''}`}
                     style={{ width: `${zoom}px` }}
+                    onClick={(event) => {
+                      togglePage(pageNumber, { shift: event.shiftKey, ctrl: event.ctrlKey || event.metaKey })
+                      scrollToPage(pageNumber)
+                    }}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' || e.key === ' ') {
+                        e.preventDefault()
+                        togglePage(pageNumber)
+                        scrollToPage(pageNumber)
+                      }
+                    }}
                   >
                     {largePreviews[pageNumber] ? (
                       <img src={largePreviews[pageNumber]} alt={`Page ${pageNumber}`} />
@@ -814,6 +909,8 @@ export function PdfViewer({ open, file, currentDir, onClose, onExtracted, onRena
         open={fileNameModalOpen}
         title="추출 파일 이름"
         defaultName={defaultExtractName}
+        preserveExtension
+        keywords={PDF_EXTRACT_KEYWORD_SUGGESTIONS}
         onConfirm={handleExtractConfirm}
         onCancel={() => setFileNameModalOpen(false)}
       />
@@ -822,6 +919,7 @@ export function PdfViewer({ open, file, currentDir, onClose, onExtracted, onRena
         open={renameModalOpen}
         title="PDF 이름 바꾸기"
         defaultName={viewerFile?.name ?? ''}
+        preserveExtension
         onConfirm={(name) => void handleRenameConfirm(name)}
         onCancel={() => setRenameModalOpen(false)}
       />
@@ -834,7 +932,6 @@ export function PdfViewer({ open, file, currentDir, onClose, onExtracted, onRena
           aria-label="추출 확인"
           style={{ zIndex: 50 }}
           tabIndex={-1}
-          onKeyDown={handlePendingExtractKeyDown}
         >
           <div
             style={{
@@ -860,11 +957,6 @@ export function PdfViewer({ open, file, currentDir, onClose, onExtracted, onRena
               <button
                 className="ghost"
                 onClick={() => void doExtract(pendingExtract.fileName, pendingExtract.pages, false)}
-                onKeyDown={(event) => {
-                  if (event.key === 'Enter') {
-                    event.stopPropagation()
-                  }
-                }}
               >
                 추출만
               </button>
@@ -872,11 +964,6 @@ export function PdfViewer({ open, file, currentDir, onClose, onExtracted, onRena
                 className="primary"
                 onClick={() => void doExtract(pendingExtract.fileName, pendingExtract.pages, true)}
                 ref={pendingExtractPrimaryRef}
-                onKeyDown={(event) => {
-                  if (event.key === 'Enter') {
-                    event.stopPropagation()
-                  }
-                }}
               >
                 추출 및 제거
               </button>

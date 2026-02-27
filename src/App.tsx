@@ -24,6 +24,7 @@ import {
   BookmarkPlus,
   CheckCircle2,
   Copy,
+  ChevronRight,
   Info,
   File,
   FileText,
@@ -53,7 +54,7 @@ import { ContextMenu, type ContextMenuItem } from './components/ContextMenu'
 import { BookmarkItem, DriveItem, FileItem, FolderItem, OrderMode, SortMode } from './types'
 import { mergeManualOrder, sortFiles, sortFolders } from './utils/folderOrder'
 import { extLabel, formatBytes, formatDate } from './utils/format'
-import { encodeFileSrcUrl, getFileDirectory } from './utils/path'
+import { encodeFileSrcUrl, getFileDirectory, withPreservedExtension } from './utils/path'
 import { resolvePasteTarget } from './utils/pasteTarget'
 import { useExplorerStore, type ClipboardState, type ExplorerEntry, type UndoEntry } from './store/useExplorerStore'
 
@@ -65,6 +66,15 @@ const SHARED_CLIPBOARD_EVENT = 'app://shared-clipboard-updated'
 const SHARED_CLIPBOARD_LOCAL_KEY = 'explorer.sharedClipboard.v1'
 type SortField = 'name' | 'modifiedAt' | 'size'
 type SortDirection = 'asc' | 'desc'
+const SOURCE_FOLDER_BADGE_COLORS = ['#2563eb', '#16a34a', '#ca8a04', '#db2777', '#7c3aed', '#0891b2', '#f97316', '#0d9488', '#0284c7', '#6366f1']
+
+type SourceFolderHint = {
+  id: string
+  path: string
+  normalizedPath: string
+  label: string
+  color: string
+}
 
 function resolveSortField(mode: SortMode): SortField {
   if (mode === 'name' || mode === 'nameDesc') return 'name'
@@ -89,6 +99,8 @@ type SortableFolderRowProps = {
   folder: FolderItem
   selected: boolean
   manualMode: boolean
+  sortable: boolean
+  depth: number
   onClick: (folder: FolderItem, modifiers: SidebarSelectModifiers) => void
   onDoubleClick: (folder: FolderItem) => void
   onDropEntries: (paths: string[], destinationPath: string, copyMode: boolean) => void
@@ -267,21 +279,25 @@ function SortableFolderRow({
   folder,
   selected,
   manualMode,
+  sortable,
+  depth,
   onClick,
   onDoubleClick,
   onDropEntries,
 }: SortableFolderRowProps) {
-  const { attributes, listeners, setNodeRef, setActivatorNodeRef, transform, transition } = useSortable({
+  const dragState = useSortable({
     id: folder.id,
-    disabled: !manualMode,
+    disabled: !manualMode || !sortable,
   })
+  const { attributes, listeners, setNodeRef, setActivatorNodeRef, transform, transition } = dragState
   const [dropTargetActive, setDropTargetActive] = useState(false)
+  const indent = Math.max(0, depth) * 16
 
   const style = {
     transform: CSS.Transform.toString(transform),
     transition,
+    paddingLeft: `${8 + indent}px`,
   }
-
   return (
     <li
       ref={setNodeRef}
@@ -289,6 +305,7 @@ function SortableFolderRow({
       className={`sidebar-row ${selected ? 'selected' : ''} ${folder.isHidden ? 'hidden-entry' : ''} ${dropTargetActive ? 'drop-target' : ''}`}
       role="option"
       aria-selected={selected}
+      aria-label={folder.name}
       tabIndex={0}
       onClick={(event) => onClick(folder, { ctrl: event.ctrlKey || event.metaKey })}
       onDoubleClick={() => onDoubleClick(folder)}
@@ -323,15 +340,24 @@ function SortableFolderRow({
     >
       <button
         ref={setActivatorNodeRef}
-        className={`drag-handle ${manualMode ? '' : 'hidden'}`}
-        disabled={!manualMode}
+        className={`drag-handle ${manualMode && sortable ? '' : 'hidden'}`}
+        disabled={!manualMode || !sortable}
         aria-label={`Drag to reorder ${folder.name}`}
-        {...listeners}
-        {...attributes}
+        {...(manualMode && sortable ? listeners : {})}
+        {...(manualMode && sortable ? attributes : {})}
+        onClick={(event) => {
+          event.stopPropagation()
+        }}
+        onDoubleClick={(event) => {
+          event.stopPropagation()
+        }}
+        onMouseDown={(event) => {
+          event.stopPropagation()
+        }}
       >
         <GripVertical size={16} />
       </button>
-      <Folder size={16} />
+      <Folder size={16} className="entry-kind-icon entry-icon-folder" />
       <span>{folder.name}</span>
     </li>
   )
@@ -344,7 +370,10 @@ type SortableEntryRowProps = {
   entry: ExplorerEntry
   selected: boolean
   manualMode: boolean
+  sortable: boolean
+  depth: number
   dragPaths: string[]
+  sourceFolderHint?: SourceFolderHint | null
   isCut: boolean
   isInlineRenaming: boolean
   inlineRenameValue: string
@@ -356,13 +385,21 @@ type SortableEntryRowProps = {
   onInlineRenameCommit: () => void
   onInlineRenameCancel: () => void
   onContextMenu?: (e: React.MouseEvent, entry: ExplorerEntry) => void
+  showSourceColumn: boolean
+  canExpand: boolean
+  isExpanded: boolean
+  isLoadingChildren: boolean
+  onToggleExpand?: (folder: FolderItem) => void
 }
 
 function SortableEntryRow({
   entry,
   selected,
   manualMode,
+  sortable,
+  depth,
   dragPaths,
+  sourceFolderHint,
   isCut,
   isInlineRenaming,
   inlineRenameValue,
@@ -374,10 +411,15 @@ function SortableEntryRow({
   onInlineRenameCommit,
   onInlineRenameCancel,
   onContextMenu,
+  showSourceColumn,
+  canExpand,
+  isExpanded,
+  isLoadingChildren,
+  onToggleExpand,
 }: SortableEntryRowProps) {
   const { attributes, listeners, setNodeRef, setActivatorNodeRef, transform, transition } = useSortable({
     id: entry.id,
-    disabled: !manualMode,
+    disabled: !manualMode || !sortable,
   })
   const [dropTargetActive, setDropTargetActive] = useState(false)
 
@@ -385,19 +427,41 @@ function SortableEntryRow({
     transform: CSS.Transform.toString(transform),
     transition,
   }
+  const sourceLocationLabel = showSourceColumn ? getPathParentFolderLabel(entry.path) : ''
+  const locationLabel = sourceFolderHint?.label || getPathParentFolderName(entry.path) || sourceLocationLabel
+  const locationTooltip = sourceFolderHint?.path || sourceLocationLabel || locationLabel
+  const locationDotColor = sourceFolderHint?.color || 'var(--text-table-head)'
+  const entryIconTone = entry.kind === 'folder' ? 'entry-icon-folder' : resolveFileIconTone(entry.ext)
+  const normalizedCanExpand = entry.kind === 'folder' && canExpand
+  const isExpandedRow = entry.kind === 'folder' && isExpanded
+  const isLoadingRowChildren = entry.kind === 'folder' && isLoadingChildren
+  const handleToggleClick = (event: React.MouseEvent) => {
+    event.preventDefault()
+    event.stopPropagation()
+    if (entry.kind !== 'folder' || !onToggleExpand || !normalizedCanExpand) return
+    onToggleExpand(entry)
+  }
+
+  const folderToggleLabel = isLoadingRowChildren
+    ? '하위 폴더 불러오는 중'
+    : !normalizedCanExpand
+      ? '하위 폴더 없음'
+      : isExpandedRow
+      ? '하위 폴더 접기'
+      : '하위 폴더 펼치기'
 
   return (
     <li
       ref={setNodeRef}
       style={style}
-      className={`table-row ${selected ? 'selected' : ''} ${entry.isHidden ? 'hidden-entry' : ''} ${isCut ? 'cut-entry' : ''} ${dropTargetActive ? 'drop-target' : ''}`}
+      className={`table-row ${selected ? 'selected' : ''} ${entry.isHidden ? 'hidden-entry' : ''} ${isCut ? 'cut-entry' : ''} ${dropTargetActive ? 'drop-target' : ''} ${showSourceColumn ? 'with-location' : ''}`}
       role="row"
       aria-selected={selected}
       tabIndex={0}
       draggable
       onDragStart={(event) => {
         const target = event.target as HTMLElement | null
-        if (manualMode && target?.closest('.file-drag-handle')) {
+        if (manualMode && sortable && target?.closest('.file-drag-handle')) {
           event.preventDefault()
           return
         }
@@ -446,11 +510,11 @@ function SortableEntryRow({
       <span role="gridcell">
         <button
           ref={setActivatorNodeRef}
-          className={`file-drag-handle ${manualMode ? '' : 'hidden'}`}
-          disabled={!manualMode}
+          className={`file-drag-handle ${manualMode && sortable ? '' : 'hidden'}`}
+          disabled={!manualMode || !sortable}
           aria-label={`Drag to reorder ${entry.name}`}
-          {...listeners}
-          {...attributes}
+          {...(manualMode && sortable ? listeners : {})}
+          {...(manualMode && sortable ? attributes : {})}
         >
           <GripVertical size={14} />
         </button>
@@ -458,8 +522,37 @@ function SortableEntryRow({
       <span
         role="gridcell"
         className="name-cell"
+        style={{ paddingLeft: `${Math.max(0, depth) * 16}px` }}
       >
-        {entry.kind === 'folder' ? <Folder size={16} /> : entry.ext === 'pdf' ? <FileText size={16} /> : <File size={16} />}
+        {entry.kind === 'folder' && onToggleExpand ? (
+          <button
+            type="button"
+            className={`folder-toggle ${isExpandedRow ? 'expanded' : normalizedCanExpand ? 'collapsed' : 'leaf'}`}
+            aria-disabled={!normalizedCanExpand}
+            disabled={!normalizedCanExpand}
+            aria-label={folderToggleLabel}
+            aria-expanded={isExpandedRow}
+            onClick={handleToggleClick}
+            onDoubleClick={(event) => {
+              event.stopPropagation()
+            }}
+          >
+            {isLoadingRowChildren ? (
+              <RefreshCcw size={13} className="folder-toggle-icon folder-toggle-spin" />
+            ) : (
+              <ChevronRight size={13} className={`folder-toggle-icon ${normalizedCanExpand ? (isExpandedRow ? 'expanded' : 'collapsed') : 'leaf'}`} />
+            )}
+          </button>
+        ) : (
+          <span className="folder-toggle-space" aria-hidden="true" />
+        )}
+        {entry.kind === 'folder' ? (
+          <Folder size={17} className={`entry-kind-icon ${entryIconTone}`} />
+        ) : entry.ext === 'pdf' ? (
+          <FileText size={17} className={`entry-kind-icon ${entryIconTone}`} />
+        ) : (
+          <File size={17} className={`entry-kind-icon ${entryIconTone}`} />
+        )}
         {isInlineRenaming ? (
           <input
             ref={inlineRenameInputRef}
@@ -486,12 +579,25 @@ function SortableEntryRow({
             aria-label={`${entry.name} 이름 편집`}
           />
         ) : (
-          <span className="entry-name-label">{entry.name}</span>
+          <span className="entry-name-label" title={entry.name}>
+            {entry.name}
+          </span>
         )}
       </span>
       <span role="gridcell">{entry.kind === 'folder' ? '폴더' : extLabel(entry.ext)}</span>
       <span role="gridcell">{entry.kind === 'folder' ? '-' : formatBytes(entry.size)}</span>
       <span role="gridcell">{formatDate(entry.modifiedAt)}</span>
+      {showSourceColumn && (
+        <span
+          role="gridcell"
+          className="entry-location"
+          title={locationTooltip}
+          aria-label={`${entry.name} 출처: ${locationLabel}`}
+        >
+          <span className="entry-location-dot" style={{ background: locationDotColor }} />
+          <span className="entry-location-label">{locationLabel}</span>
+        </span>
+      )}
     </li>
   )
 }
@@ -501,6 +607,7 @@ type SortableGalleryCardProps = {
   selected: boolean
   manualMode: boolean
   dragPaths: string[]
+  sourceFolderHint?: SourceFolderHint | null
   isCut: boolean
   isInlineRenaming: boolean
   inlineRenameValue: string
@@ -513,6 +620,7 @@ type SortableGalleryCardProps = {
   onInlineRenameCommit: () => void
   onInlineRenameCancel: () => void
   onContextMenu?: (e: React.MouseEvent, entry: ExplorerEntry) => void
+  showSourceColumn: boolean
 }
 
 function SortableGalleryCard({
@@ -520,6 +628,7 @@ function SortableGalleryCard({
   selected,
   manualMode,
   dragPaths,
+  sourceFolderHint,
   isCut,
   isInlineRenaming,
   inlineRenameValue,
@@ -532,6 +641,7 @@ function SortableGalleryCard({
   onInlineRenameCommit,
   onInlineRenameCancel,
   onContextMenu,
+  showSourceColumn,
 }: SortableGalleryCardProps) {
   const { attributes, listeners, setNodeRef, setActivatorNodeRef, transform, transition } = useSortable({
     id: entry.id,
@@ -543,6 +653,11 @@ function SortableGalleryCard({
     transform: CSS.Transform.toString(transform),
     transition,
   }
+  const sourceLocationLabel = showSourceColumn ? getPathParentFolderLabel(entry.path) : ''
+  const locationLabel = sourceFolderHint?.label || getPathParentFolderName(entry.path) || sourceLocationLabel
+  const locationTooltip = sourceFolderHint?.path || sourceLocationLabel || locationLabel
+  const locationDotColor = sourceFolderHint?.color || 'var(--text-table-head)'
+  const entryIconTone = entry.kind === 'folder' ? 'entry-icon-folder' : resolveFileIconTone(entry.ext)
 
   return (
     <div
@@ -622,13 +737,13 @@ function SortableGalleryCard({
       )}
       <div className="gallery-thumb">
         {entry.kind === 'folder' ? (
-          <Folder size={32} />
+          <Folder size={32} className={`entry-kind-icon ${entryIconTone}`} />
         ) : isImage(entry.ext) ? (
           <img src={toEncodedFileSrc(entry.path)} alt={entry.name} loading="lazy" />
         ) : entry.ext === 'pdf' ? (
-          <FileText size={32} />
+          <FileText size={32} className={`entry-kind-icon ${entryIconTone}`} />
         ) : (
-          <File size={32} />
+          <File size={32} className={`entry-kind-icon ${entryIconTone}`} />
         )}
       </div>
       {isInlineRenaming ? (
@@ -661,7 +776,15 @@ function SortableGalleryCard({
           {entry.name}
         </strong>
       )}
-      <span>{entry.kind === 'folder' ? '폴더' : extLabel(entry.ext)}</span>
+      <div className="gallery-meta">
+        <span className="gallery-type">{entry.kind === 'folder' ? '폴더' : extLabel(entry.ext)}</span>
+        {showSourceColumn && (
+          <div className="gallery-location" title={locationTooltip}>
+            <span className="entry-location-dot" style={{ background: locationDotColor }} />
+            <span className="gallery-location-label">{locationLabel}</span>
+          </div>
+        )}
+      </div>
     </div>
   )
 }
@@ -720,6 +843,17 @@ function isImage(ext: string) {
   return ['png', 'jpg', 'jpeg', 'gif', 'bmp', 'webp'].includes(ext.toLowerCase())
 }
 
+function resolveFileIconTone(ext: string): string {
+  const normalizedExt = ext.toLowerCase()
+  if (normalizedExt === 'pdf') return 'entry-icon-pdf'
+  if (['png', 'jpg', 'jpeg', 'gif', 'bmp', 'webp', 'svg'].includes(normalizedExt)) return 'entry-icon-image'
+  if (['doc', 'docx', 'hwp', 'txt', 'rtf', 'md'].includes(normalizedExt)) return 'entry-icon-doc'
+  if (['xls', 'xlsx', 'csv'].includes(normalizedExt)) return 'entry-icon-sheet'
+  if (['ppt', 'pptx'].includes(normalizedExt)) return 'entry-icon-slide'
+  if (['zip', 'rar', '7z', 'tar', 'gz'].includes(normalizedExt)) return 'entry-icon-archive'
+  return 'entry-icon-file'
+}
+
 function toEncodedFileSrc(path: string): string {
   return encodeFileSrcUrl(convertFileSrc(path))
 }
@@ -735,6 +869,90 @@ function deriveBookmarkName(path: string) {
   return name || normalized
 }
 
+function getPathParentFolderLabel(path: string): string {
+  const normalized = path.replace(/[\\/]+$/, '')
+  const lastSep = Math.max(normalized.lastIndexOf('/'), normalized.lastIndexOf('\\'))
+  if (lastSep < 0) return ''
+
+  const parentPath = normalized.slice(0, lastSep)
+  if (!parentPath) return ''
+  if (/^[A-Za-z]:$/.test(parentPath)) {
+    return `${parentPath}\\`
+  }
+
+  return toWindowsStylePath(parentPath)
+}
+
+function getPathParentFolderName(path: string): string {
+  const sourcePath = getPathParentFolderLabel(path)
+  if (!sourcePath) return ''
+  const normalized = sourcePath.replace(/[\\/]+$/, '')
+  const parts = normalized.split(/[\\/]+/).filter(Boolean)
+  return parts.length > 0 ? parts[parts.length - 1] : sourcePath
+}
+
+function normalizePathForSourceMatch(path: string): string {
+  return path.replace(/[\\/]+/g, '/').replace(/\/+$/g, '').replace(/\/\/+/g, '/')
+}
+
+function getSourceFolderLabelForDisplay(path: string, showDisambiguated: boolean): string {
+  const normalized = normalizePathForSourceMatch(toWindowsStylePath(path))
+  const parts = normalized.split('/').filter(Boolean)
+  if (parts.length <= 1) {
+    return parts[parts.length - 1] ?? normalized
+  }
+  if (!showDisambiguated) {
+    return parts[parts.length - 1]
+  }
+  return parts.slice(-2).join('\\')
+}
+
+function resolveSourceFolderHint(path: string, sourceFolderHints: SourceFolderHint[]): SourceFolderHint | null {
+  if (!sourceFolderHints.length) return null
+  const normalized = normalizePathForSourceMatch(path)
+
+  let bestMatch: SourceFolderHint | null = null
+  for (const hint of sourceFolderHints) {
+    const prefix = hint.normalizedPath
+    if (normalized === prefix || normalized.startsWith(`${prefix}/`)) {
+      if (!bestMatch || prefix.length > bestMatch.normalizedPath.length) {
+        bestMatch = hint
+      }
+    }
+  }
+
+  return bestMatch
+}
+
+function buildSourceFolderHints(folders: FolderItem[], selectedSidebarFolderIds: string[]): SourceFolderHint[] {
+  if (selectedSidebarFolderIds.length < 2) return []
+
+  const folderById = new Map(folders.map((folder) => [folder.id, folder]))
+  const selectedFolders = selectedSidebarFolderIds
+    .map((id) => folderById.get(id))
+    .filter((folder): folder is FolderItem => Boolean(folder))
+
+  if (selectedFolders.length < 2) return []
+
+  const nameCount = new Map<string, number>()
+  for (const folder of selectedFolders) {
+    const baseName = getPathName(folder.path)
+    nameCount.set(baseName, (nameCount.get(baseName) ?? 0) + 1)
+  }
+
+  return selectedFolders.map((folder, index) => {
+    const baseName = getPathName(folder.path)
+    const disambiguate = (nameCount.get(baseName) ?? 0) > 1
+    return {
+      id: folder.id,
+      path: folder.path,
+      normalizedPath: normalizePathForSourceMatch(folder.path),
+      label: getSourceFolderLabelForDisplay(folder.path, disambiguate),
+      color: SOURCE_FOLDER_BADGE_COLORS[index % SOURCE_FOLDER_BADGE_COLORS.length],
+    }
+  })
+}
+
 function getPathName(path: string): string {
   const normalized = path.replace(/[\\/]+$/, '')
   const slashIndex = Math.max(normalized.lastIndexOf('/'), normalized.lastIndexOf('\\'))
@@ -743,6 +961,28 @@ function getPathName(path: string): string {
 
 function dedupeById<T extends { id: string }>(items: T[]): T[] {
   return Array.from(new Map(items.map((item) => [item.id, item])).values())
+}
+
+type EntryTreeRow = {
+  key: string
+  entry?: ExplorerEntry
+  depth: number
+  parentFolderId?: string
+  placeholder?: 'loading' | 'empty'
+}
+
+function sortExplorerEntries(entries: ExplorerEntry[], mode: SortMode): ExplorerEntry[] {
+  const folders = entries
+    .filter((entry): entry is Extract<ExplorerEntry, { kind: 'folder' }> => entry.kind === 'folder')
+    .map(({ kind: _kind, ...folder }) => folder)
+  const files = entries
+    .filter((entry): entry is Extract<ExplorerEntry, { kind: 'file' }> => entry.kind === 'file')
+    .map(({ kind: _kind, ...file }) => file)
+
+  return [
+    ...sortFolders(folders, mode).map((folder) => ({ ...folder, kind: 'folder' as const })),
+    ...sortFiles(files, mode).map((file) => ({ ...file, kind: 'file' as const })),
+  ]
 }
 
 export default function App() {
@@ -805,6 +1045,9 @@ export default function App() {
   // Phase E1: Context menu
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null)
   const [selectedSidebarFolderIds, setSelectedSidebarFolderIds] = useState<string[]>([])
+  const [expandedEntryFolderIds, setExpandedEntryFolderIds] = useState<Set<string>>(new Set())
+  const [entryChildrenByFolderId, setEntryChildrenByFolderId] = useState<Map<string, ExplorerEntry[]>>(new Map())
+  const [entryChildrenLoadingIds, setEntryChildrenLoadingIds] = useState<Set<string>>(new Set())
   const [visibleFolderCount, setVisibleFolderCount] = useState(FOLDER_PAGE_SIZE)
   const [visibleEntryCount, setVisibleEntryCount] = useState(ENTRY_PAGE_SIZE)
   const [undoToastMessage, setUndoToastMessage] = useState<string | null>(null)
@@ -822,6 +1065,10 @@ export default function App() {
   const selectedSidebarFolderIdSet = useMemo(
     () => new Set(selectedSidebarFolderIds),
     [selectedSidebarFolderIds],
+  )
+  const allKnownFolderById = useMemo(
+    () => new Map(displayFolders.map((folder) => [folder.id, folder] as const)),
+    [displayFolders],
   )
 
   const autoSortedEntries = useMemo<ExplorerEntry[]>(() => {
@@ -841,30 +1088,113 @@ export default function App() {
     [autoSortedEntries, orderMode, entryManualOrderIds],
   )
 
-  const displayEntries = useMemo(() => {
+  const baseDisplayEntries = useMemo(() => {
     if (!searchQuery.trim()) return orderedEntries
     const q = searchQuery.trim().toLowerCase()
     return orderedEntries.filter((entry) => entry.name.toLowerCase().includes(q))
   }, [orderedEntries, searchQuery])
-  const visibleEntries = useMemo(
-    () => (orderMode === 'manual' ? displayEntries : displayEntries.slice(0, visibleEntryCount)),
-    [displayEntries, orderMode, visibleEntryCount],
+  const visibleRootEntries = useMemo(
+    () => (orderMode === 'manual' ? baseDisplayEntries : baseDisplayEntries.slice(0, visibleEntryCount)),
+    [baseDisplayEntries, orderMode, visibleEntryCount],
   )
-  const hasMoreEntries = orderMode !== 'manual' && visibleEntries.length < displayEntries.length
+  const hasMoreEntries = orderMode !== 'manual' && visibleRootEntries.length < baseDisplayEntries.length
+  const getSortedEntryChildren = (folderId: string) => {
+    const children = entryChildrenByFolderId.get(folderId) ?? []
+    return sortExplorerEntries(children, sortMode)
+  }
+  const visibleEntryRows = useMemo<EntryTreeRow[]>(() => {
+    const buildRows = (entries: ExplorerEntry[], depth: number, parentFolderId?: string): EntryTreeRow[] => {
+      return entries.flatMap((entry) => {
+        const row: EntryTreeRow = {
+          key: entry.id,
+          entry,
+          depth,
+          parentFolderId,
+        }
+
+        if (entry.kind !== 'folder') {
+          return [row]
+        }
+
+        const isExpanded = expandedEntryFolderIds.has(entry.id)
+        if (!isExpanded) {
+          return [row]
+        }
+
+        const isLoadingChildren = entryChildrenLoadingIds.has(entry.id)
+        if (isLoadingChildren) {
+          return [
+            row,
+            {
+              key: `${entry.id}:loading`,
+              depth: depth + 1,
+              parentFolderId: entry.id,
+              placeholder: 'loading',
+            },
+          ]
+        }
+
+        const childEntries = getSortedEntryChildren(entry.id)
+        if (childEntries.length === 0) {
+          return [
+            row,
+            {
+              key: `${entry.id}:empty`,
+              depth: depth + 1,
+              parentFolderId: entry.id,
+              placeholder: 'empty',
+            },
+          ]
+        }
+
+        return [row, ...buildRows(childEntries, depth + 1, entry.id)]
+      })
+    }
+
+    return buildRows(visibleRootEntries, 0)
+  }, [visibleRootEntries, expandedEntryFolderIds, entryChildrenLoadingIds, entryChildrenByFolderId, sortMode])
+  const visibleEntries = useMemo(
+    () => visibleEntryRows.filter((row): row is EntryTreeRow & { entry: ExplorerEntry } => Boolean(row.entry)).map((row) => row.entry),
+    [visibleEntryRows],
+  )
   const selectedEntryIdSet = useMemo(() => new Set(selectedEntryIds), [selectedEntryIds])
+  const allKnownEntryNodes = useMemo(() => {
+    const collected: ExplorerEntry[] = [...baseDisplayEntries]
+    for (const children of entryChildrenByFolderId.values()) {
+      collected.push(...children)
+    }
+    return dedupeById(collected)
+  }, [baseDisplayEntries, entryChildrenByFolderId])
   const entryById = useMemo(
-    () => new Map(displayEntries.map((entry) => [entry.id, entry] as const)),
-    [displayEntries],
+    () => new Map(allKnownEntryNodes.map((entry) => [entry.id, entry] as const)),
+    [allKnownEntryNodes],
   )
   const entryIndexById = useMemo(
-    () => new Map(displayEntries.map((entry, index) => [entry.id, index] as const)),
-    [displayEntries],
+    () => new Map(visibleEntries.map((entry, index) => [entry.id, index] as const)),
+    [visibleEntries],
   )
 
   const selectedEntries = useMemo(
-    () => displayEntries.filter((entry) => selectedEntryIdSet.has(entry.id)),
-    [displayEntries, selectedEntryIdSet],
+    () => selectedEntryIds.map((id) => entryById.get(id)).filter((entry): entry is ExplorerEntry => Boolean(entry)),
+    [selectedEntryIds, entryById],
   )
+
+  const showSourceColumn = useMemo(() => selectedSidebarFolderIds.length > 1, [selectedSidebarFolderIds])
+  const sourceFolderHints = useMemo(
+    () => buildSourceFolderHints(folders, selectedSidebarFolderIds),
+    [folders, selectedSidebarFolderIds],
+  )
+  const sourceFolderByEntryId = useMemo(() => {
+    if (!showSourceColumn || sourceFolderHints.length === 0) return new Map<string, SourceFolderHint>()
+    const map = new Map<string, SourceFolderHint>()
+    for (const entry of visibleEntries) {
+      const hint = resolveSourceFolderHint(entry.path, sourceFolderHints)
+      if (hint) {
+        map.set(entry.id, hint)
+      }
+    }
+    return map
+  }, [visibleEntries, sourceFolderHints, showSourceColumn])
 
   const selectedPaths = useMemo(() => selectedEntries.map((e) => e.path), [selectedEntries])
   const canCreateFolder = Boolean(previewPath || currentPath)
@@ -878,9 +1208,15 @@ export default function App() {
   }, [entryById, selectedEntryIds])
 
   const selectedFile = lastSelectedEntry?.kind === 'file' ? lastSelectedEntry : null
-  const previewPdfFiles = useMemo(
-    () => previewFiles.filter((file) => file.ext.toLowerCase() === 'pdf'),
-    [previewFiles],
+  const previewPdfFiles = useMemo<FileItem[]>(
+    () =>
+      orderedEntries
+        .filter(
+          (entry): entry is Extract<ExplorerEntry, { kind: 'file' }> =>
+            entry.kind === 'file' && entry.ext.toLowerCase() === 'pdf',
+        )
+        .map(({ kind: _kind, ...file }) => file),
+    [orderedEntries],
   )
 
   const cutPathSet = useMemo(
@@ -1008,9 +1344,73 @@ export default function App() {
     }
   }
 
+  async function loadEntryChildren(folder: FolderItem): Promise<ExplorerEntry[]> {
+    if (entryChildrenByFolderId.has(folder.id) || entryChildrenLoadingIds.has(folder.id)) {
+      return []
+    }
+
+    setEntryChildrenLoadingIds((prev) => {
+      const next = new Set(prev)
+      next.add(folder.id)
+      return next
+    })
+
+    try {
+      const [childFolders, childFiles] = await Promise.all([
+        invoke<FolderItem[]>('list_folders', { parentPath: folder.path }),
+        invoke<FileItem[]>('list_files', { parentPath: folder.path }),
+      ])
+      const dedupedEntries = dedupeById([
+        ...childFolders.map((entry) => ({ ...entry, kind: 'folder' as const })),
+        ...childFiles.map((entry) => ({ ...entry, kind: 'file' as const })),
+      ])
+
+      setEntryChildrenByFolderId((prev) => {
+        const next = new Map(prev)
+        next.set(folder.id, dedupedEntries)
+        return next
+      })
+      return dedupedEntries
+    } catch (e) {
+      setError(e instanceof Error ? e.message : '하위 항목을 불러오지 못했습니다.')
+      setEntryChildrenByFolderId((prev) => {
+        const next = new Map(prev)
+        next.set(folder.id, [])
+        return next
+      })
+      return []
+    } finally {
+      setEntryChildrenLoadingIds((prev) => {
+        const next = new Set(prev)
+        next.delete(folder.id)
+        return next
+      })
+    }
+  }
+
+  function toggleRightPanelFolderExpansion(folder: FolderItem) {
+    const isExpanded = expandedEntryFolderIds.has(folder.id)
+    setExpandedEntryFolderIds((prev) => {
+      const next = new Set(prev)
+      if (isExpanded) {
+        next.delete(folder.id)
+      } else {
+        next.add(folder.id)
+      }
+      return next
+    })
+
+    if (!isExpanded) {
+      void loadEntryChildren(folder)
+    }
+  }
+
   async function loadPreviewEntries(pathOrPaths: string | string[]) {
     setPreviewLoading(true)
     setError(null)
+    setExpandedEntryFolderIds(new Set())
+    setEntryChildrenByFolderId(new Map())
+    setEntryChildrenLoadingIds(new Set())
     const targetPaths = Array.isArray(pathOrPaths)
       ? Array.from(new Set(pathOrPaths.filter((path) => path.length > 0)))
       : [pathOrPaths]
@@ -1063,16 +1463,14 @@ export default function App() {
 
   async function refreshExplorer() {
     await loadDrives()
-    let refreshedFolders: FolderItem[] = []
     if (currentPath) {
-      refreshedFolders = await loadFolders(currentPath)
+      await loadFolders(currentPath)
     }
 
     if (selectedSidebarFolderIds.length > 1) {
-      const selectedFolderIdSet = new Set(selectedSidebarFolderIds)
-      const selectedFolderPaths = refreshedFolders
-        .filter((folder) => selectedFolderIdSet.has(folder.id))
-        .map((folder) => folder.path)
+      const selectedFolderPaths = Array.from(
+        new Set(selectedSidebarFolderIds.map((id) => allKnownFolderById.get(id)?.path).filter((path): path is string => Boolean(path))),
+      )
       if (selectedFolderPaths.length > 1) {
         await loadPreviewEntries(selectedFolderPaths)
         return
@@ -1223,7 +1621,7 @@ export default function App() {
 
   function renameSelected() {
     if (selectedEntryIds.length !== 1) return
-    const entry = displayEntries.find((e) => e.id === selectedEntryIds[0])
+    const entry = entryById.get(selectedEntryIds[0])
     if (!entry) return
     cancelInlineRename()
     setRenameTarget(entry)
@@ -1258,13 +1656,17 @@ export default function App() {
     if (!trimmed || trimmed === entry.name) {
       return null
     }
+    const renamed = entry.kind === 'file' ? withPreservedExtension(trimmed, entry.name) : trimmed
+    if (renamed === entry.name) {
+      return null
+    }
     if (actionInProgress) {
       return null
     }
     setActionInProgress(true)
 
     try {
-      const renamedPath = await invoke<string>('rename_path', { path: entry.path, newName: trimmed })
+      const renamedPath = await invoke<string>('rename_path', { path: entry.path, newName: renamed })
       setSelectedEntryIds([renamedPath])
 
       if (recordUndo) {
@@ -1617,8 +2019,8 @@ export default function App() {
   const ensureEntryVisible = (entryIndex: number) => {
     if (entryIndex < 0 || orderMode === 'manual') return
     setVisibleEntryCount((prev) => {
-      if (entryIndex < prev) return prev
-      return Math.min(displayEntries.length, Math.max(prev + ENTRY_PAGE_SIZE, entryIndex + 1))
+      if (entryIndex < visibleEntries.length) return prev
+      return Math.min(baseDisplayEntries.length, prev + ENTRY_PAGE_SIZE)
     })
   }
 
@@ -1652,7 +2054,7 @@ export default function App() {
 
       if (ctrlOrMeta && event.key.toLowerCase() === 'a') {
         event.preventDefault()
-        setSelectedEntryIds(displayEntries.map((e) => e.id))
+        setSelectedEntryIds(visibleEntries.map((e) => e.id))
         return
       }
       if (ctrlOrMeta && event.key.toLowerCase() === 'c' && selectedPaths.length > 0 && !operationInProgress) {
@@ -1703,14 +2105,14 @@ export default function App() {
           selectedEntryIds.length > 0
             ? (entryIndexById.get(selectedEntryIds[selectedEntryIds.length - 1]) ?? -1)
             : -1
-        const nextIndex = Math.min(currentIndex + 1, displayEntries.length - 1)
+        const nextIndex = Math.min(currentIndex + 1, visibleEntries.length - 1)
         if (nextIndex >= 0) {
           ensureEntryVisible(nextIndex)
           if (event.shiftKey) {
-            const id = displayEntries[nextIndex].id
+            const id = visibleEntries[nextIndex].id
             setSelectedEntryIds((prev) => (prev.includes(id) ? prev : [...prev, id]))
           } else {
-            setSelectedEntryIds([displayEntries[nextIndex].id])
+            setSelectedEntryIds([visibleEntries[nextIndex].id])
           }
           lastClickedIndexRef.current = nextIndex
         }
@@ -1720,16 +2122,16 @@ export default function App() {
         event.preventDefault()
         const currentIndex =
           selectedEntryIds.length > 0
-            ? (entryIndexById.get(selectedEntryIds[selectedEntryIds.length - 1]) ?? displayEntries.length)
-            : displayEntries.length
+            ? (entryIndexById.get(selectedEntryIds[selectedEntryIds.length - 1]) ?? visibleEntries.length)
+            : visibleEntries.length
         const prevIndex = Math.max(currentIndex - 1, 0)
-        if (displayEntries.length > 0) {
+        if (visibleEntries.length > 0) {
           ensureEntryVisible(prevIndex)
           if (event.shiftKey) {
-            const id = displayEntries[prevIndex].id
+            const id = visibleEntries[prevIndex].id
             setSelectedEntryIds((prev) => (prev.includes(id) ? prev : [...prev, id]))
           } else {
-            setSelectedEntryIds([displayEntries[prevIndex].id])
+            setSelectedEntryIds([visibleEntries[prevIndex].id])
           }
           lastClickedIndexRef.current = prevIndex
         }
@@ -1739,7 +2141,7 @@ export default function App() {
 
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [selectedEntries, selectedPaths, selectedEntryIds, lastSelectedEntry, displayEntries, entryIndexById, previewPath, clipboard, operationInProgress, orderMode])
+  }, [selectedEntries, selectedPaths, selectedEntryIds, lastSelectedEntry, visibleEntries, baseDisplayEntries, entryIndexById, previewPath, clipboard, operationInProgress, orderMode])
 
   useEffect(() => {
     if (!error) return
@@ -1796,7 +2198,9 @@ export default function App() {
           : [...selectedSidebarFolderIds, folder.id])
         : [folder.id]
       const nextFolderIdSet = new Set(nextSelectedIds)
-      const nextSelectedFolders = displayFolders.filter((item) => nextFolderIdSet.has(item.id))
+      const nextSelectedFolders = Array.from(nextFolderIdSet)
+        .map((id) => allKnownFolderById.get(id))
+        .filter((item): item is FolderItem => Boolean(item))
       const normalizedSelectedIds = nextSelectedFolders.map((item) => item.id)
 
       setSelectedSidebarFolderIds(normalizedSelectedIds)
@@ -1847,7 +2251,7 @@ export default function App() {
     if (modifiers.shift && lastClickedIndexRef.current >= 0) {
       const start = Math.min(lastClickedIndexRef.current, entryIndex)
       const end = Math.max(lastClickedIndexRef.current, entryIndex)
-      const rangeIds = displayEntries.slice(start, end + 1).map((e) => e.id)
+      const rangeIds = visibleEntries.slice(start, end + 1).map((e) => e.id)
 
       if (modifiers.ctrl) {
         setSelectedEntryIds((prev) => {
@@ -1894,7 +2298,7 @@ export default function App() {
   }
 
   const handleLoadMoreEntries = () => {
-    setVisibleEntryCount((prev) => Math.min(displayEntries.length, prev + ENTRY_PAGE_SIZE))
+    setVisibleEntryCount((prev) => Math.min(baseDisplayEntries.length, prev + ENTRY_PAGE_SIZE))
   }
 
   const handleOrderModeToggle = async () => {
@@ -1943,11 +2347,11 @@ export default function App() {
     const { active, over } = event
     if (!over || active.id === over.id) return
 
-    const oldIndex = displayEntries.findIndex((entry) => entry.id === active.id)
-    const newIndex = displayEntries.findIndex((entry) => entry.id === over.id)
+    const oldIndex = baseDisplayEntries.findIndex((entry) => entry.id === active.id)
+    const newIndex = baseDisplayEntries.findIndex((entry) => entry.id === over.id)
     if (oldIndex < 0 || newIndex < 0) return
 
-    const reordered = arrayMove(displayEntries, oldIndex, newIndex)
+    const reordered = arrayMove(baseDisplayEntries, oldIndex, newIndex)
     const ids = reordered.map((entry) => entry.id)
     setEntryManualOrderIds(ids)
 
@@ -1958,6 +2362,28 @@ export default function App() {
       })
     } catch (e) {
       setError(e instanceof Error ? e.message : '항목 순서 저장에 실패했습니다.')
+    }
+  }
+
+  const getRightPanelFolderToggleState = (entry: ExplorerEntry) => {
+    if (entry.kind !== 'folder') {
+      return {
+        canExpand: false,
+        isExpanded: false,
+        isLoadingChildren: false,
+      }
+    }
+
+    const isExpanded = expandedEntryFolderIds.has(entry.id)
+    const isLoadingChildren = entryChildrenLoadingIds.has(entry.id)
+    const childEntries = getSortedEntryChildren(entry.id)
+    const hasLoadedChildren = entryChildrenByFolderId.has(entry.id)
+    const canExpand = isLoadingChildren || !hasLoadedChildren || isExpanded || childEntries.length > 0
+
+    return {
+      canExpand,
+      isExpanded,
+      isLoadingChildren,
     }
   }
 
@@ -2257,24 +2683,26 @@ export default function App() {
             <p className="state-text">폴더 로딩 중...</p>
           ) : (
             <>
-              <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleFolderDragEnd} onDragStart={(event) => setActiveDragId(String(event.active.id))}>
-                <SortableContext items={visibleFolders.map((folder) => folder.id)} strategy={verticalListSortingStrategy}>
-                  <ul className="sidebar-list" role="listbox" aria-label="폴더 목록" aria-multiselectable="true">
-                    {visibleFolders.map((folder) => (
-                      <SortableFolderRow
-                        key={folder.id}
-                        folder={folder}
-                        selected={selectedSidebarFolderIdSet.has(folder.id)}
-                        manualMode={orderMode === 'manual'}
-                        onClick={handleSidebarFolderClick}
-                        onDoubleClick={handleSidebarFolderDoubleClick}
-                        onDropEntries={(paths, destinationPath, copyMode) =>
-                          void applyPathOperation(paths, destinationPath, copyMode ? 'copy' : 'move')
-                        }
-                      />
-                    ))}
-                  </ul>
-                </SortableContext>
+                <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleFolderDragEnd} onDragStart={(event) => setActiveDragId(String(event.active.id))}>
+                  <SortableContext items={visibleFolders.map((folder) => folder.id)} strategy={verticalListSortingStrategy}>
+                    <ul className="sidebar-list" role="listbox" aria-label="폴더 목록" aria-multiselectable="true">
+                      {visibleFolders.map((folder) => (
+                        <SortableFolderRow
+                          key={folder.id}
+                          folder={folder}
+                          selected={selectedSidebarFolderIdSet.has(folder.id)}
+                          manualMode={orderMode === 'manual'}
+                          sortable
+                          depth={0}
+                          onClick={handleSidebarFolderClick}
+                          onDoubleClick={handleSidebarFolderDoubleClick}
+                          onDropEntries={(paths, destinationPath, copyMode) =>
+                            void applyPathOperation(paths, destinationPath, copyMode ? 'copy' : 'move')
+                          }
+                        />
+                      ))}
+                    </ul>
+                  </SortableContext>
                 <DragOverlay>
                   {activeDragId ? (
                     <div style={{ padding: '8px 12px', background: '#fff', border: '1px solid var(--accent)', borderRadius: 8, boxShadow: '0 4px 12px rgba(0,0,0,0.15)', fontSize: 14, display: 'flex', alignItems: 'center', gap: 6 }}>
@@ -2314,12 +2742,22 @@ export default function App() {
         >
           <div className="pane-head">
             <p className="pane-summary">
-              {displayEntries.length}개 항목
-              {hasMoreEntries && ` · ${visibleEntries.length}개 표시 중`}
+              {baseDisplayEntries.length}개 항목
+              {hasMoreEntries && ` · ${visibleRootEntries.length}개 표시 중`}
               {selectedSidebarFolderIds.length > 1 && ` · 폴더 ${selectedSidebarFolderIds.length}개 통합 보기`}
               {selectedEntries.length > 0 && ` · ${selectedEntries.length}개 선택됨`}
               {clipboard && ` · 클립보드: ${clipboard.mode === 'copy' ? '복사' : '잘라내기'} ${clipboard.paths.length}개`}
             </p>
+            {showSourceColumn && sourceFolderHints.length > 0 && (
+              <div className="source-badges" role="list" aria-label="통합 보기 출처">
+                {sourceFolderHints.map((folder) => (
+                  <span key={folder.id} className="source-badge" role="listitem" title={folder.path}>
+                    <span className="source-badge-dot" style={{ background: folder.color }} />
+                    <span className="source-badge-label">{folder.label}</span>
+                  </span>
+                ))}
+              </div>
+            )}
             <p className="pane-hint">
               드래그 기본 동작: 이동 (Ctrl/Cmd를 누르면 복사)
             </p>
@@ -2343,19 +2781,20 @@ export default function App() {
           </div>
 
           {previewLoading && <p className="state-text">항목 로딩 중...</p>}
-          {!previewLoading && displayEntries.length === 0 && <p className="state-text">현재 폴더가 비어 있습니다.</p>}
+          {!previewLoading && baseDisplayEntries.length === 0 && <p className="state-text">현재 폴더가 비어 있습니다.</p>}
 
-          {!previewLoading && displayEntries.length > 0 && viewMode === 'list' && (
+          {!previewLoading && baseDisplayEntries.length > 0 && viewMode === 'list' && (
             <div className="table-wrap" role="grid" aria-label="파일 목록">
-              <div className="table-head" role="row">
+              <div className={`table-head ${showSourceColumn ? 'with-location' : ''}`} role="row">
                 <span role="columnheader" />
                 <span role="columnheader">이름</span>
                 <span role="columnheader">형식</span>
                 <span role="columnheader">크기</span>
                 <span role="columnheader">수정한 날짜</span>
+                {showSourceColumn && <span role="columnheader">위치</span>}
               </div>
               <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleEntryDragEnd} onDragStart={(event) => setActiveDragId(String(event.active.id))}>
-                <SortableContext items={visibleEntries.map((entry) => entry.id)} strategy={verticalListSortingStrategy}>
+                <SortableContext items={visibleRootEntries.map((entry) => entry.id)} strategy={verticalListSortingStrategy}>
                   <ul className="table-body" role="rowgroup" onClick={(e) => {
                     if (e.target === e.currentTarget) {
                       cancelInlineRename()
@@ -2368,28 +2807,53 @@ export default function App() {
                       handleContentContextMenu(e)
                     }
                   }}>
-                    {visibleEntries.map((entry) => (
-                      <SortableEntryRow
-                        key={entry.id}
-                        entry={entry}
-                        selected={selectedEntryIdSet.has(entry.id)}
-                        manualMode={orderMode === 'manual'}
-                        dragPaths={selectedPaths}
-                        isCut={cutPathSet.has(entry.path)}
-                        isInlineRenaming={inlineRenameId === entry.id}
-                        inlineRenameValue={inlineRenameValue}
-                        inlineRenameInputRef={inlineRenameInputRef}
-                        onSelect={handleEntrySelect}
-                        onOpen={(item) => void openEntry(item)}
-                        onDropEntries={(paths, destinationPath, copyMode) =>
-                          void applyPathOperation(paths, destinationPath, copyMode ? 'copy' : 'move')
-                        }
-                        onInlineRenameChange={setInlineRenameValue}
-                        onInlineRenameCommit={() => void commitInlineRename()}
-                        onInlineRenameCancel={cancelInlineRename}
-                        onContextMenu={handleContextMenu}
-                      />
-                    ))}
+                    {visibleEntryRows.map((row) => {
+                      if (!row.entry) {
+                        return (
+                          <li
+                            key={row.key}
+                            className="table-row table-child-row"
+                            role="presentation"
+                            style={{ paddingLeft: `${22 + row.depth * 16}px` }}
+                          >
+                            <span>{row.placeholder === 'loading' ? '하위 항목 로딩 중...' : '하위 항목 없음'}</span>
+                          </li>
+                        )
+                      }
+
+                      const entry = row.entry
+                      const folderToggleState = getRightPanelFolderToggleState(entry)
+                      return (
+                        <SortableEntryRow
+                          key={row.key}
+                          entry={entry}
+                          selected={selectedEntryIdSet.has(entry.id)}
+                          manualMode={orderMode === 'manual'}
+                          sortable={row.depth === 0}
+                          depth={row.depth}
+                          dragPaths={selectedPaths}
+                          isCut={cutPathSet.has(entry.path)}
+                          isInlineRenaming={inlineRenameId === entry.id}
+                          inlineRenameValue={inlineRenameValue}
+                          inlineRenameInputRef={inlineRenameInputRef}
+                          onSelect={handleEntrySelect}
+                          sourceFolderHint={sourceFolderByEntryId.get(entry.id) ?? null}
+                          onOpen={(item) => void openEntry(item)}
+                          onDropEntries={(paths, destinationPath, copyMode) =>
+                            void applyPathOperation(paths, destinationPath, copyMode ? 'copy' : 'move')
+                          }
+                          canExpand={folderToggleState.canExpand}
+                          isExpanded={folderToggleState.isExpanded}
+                          isLoadingChildren={folderToggleState.isLoadingChildren}
+                          onToggleExpand={toggleRightPanelFolderExpansion}
+                          onInlineRenameChange={setInlineRenameValue}
+                          onInlineRenameCommit={() => void commitInlineRename()}
+                          onInlineRenameCancel={cancelInlineRename}
+                          onContextMenu={handleContextMenu}
+                          showSourceColumn={showSourceColumn}
+                        />
+                      )
+                    })}
                   </ul>
                 </SortableContext>
                 <DragOverlay>
@@ -2403,14 +2867,14 @@ export default function App() {
               {hasMoreEntries && (
                 <div className="load-more-wrap">
                   <button className="win-btn load-more-btn" onClick={handleLoadMoreEntries}>
-                    항목 더 보기 (+{Math.min(ENTRY_PAGE_SIZE, displayEntries.length - visibleEntries.length)})
+                    항목 더 보기 (+{Math.min(ENTRY_PAGE_SIZE, baseDisplayEntries.length - visibleRootEntries.length)})
                   </button>
                 </div>
               )}
             </div>
           )}
 
-          {!previewLoading && displayEntries.length > 0 && viewMode === 'gallery' && (
+          {!previewLoading && baseDisplayEntries.length > 0 && viewMode === 'gallery' && (
             <>
               <DndContext
                 sensors={sensors}
@@ -2418,7 +2882,7 @@ export default function App() {
                 onDragEnd={handleEntryDragEnd}
                 onDragStart={(event) => setActiveDragId(String(event.active.id))}
               >
-                <SortableContext items={visibleEntries.map((entry) => entry.id)} strategy={verticalListSortingStrategy}>
+                <SortableContext items={visibleRootEntries.map((entry) => entry.id)} strategy={verticalListSortingStrategy}>
                   <div
                     className="gallery-wrap"
                     onClick={(e) => {
@@ -2434,7 +2898,7 @@ export default function App() {
                       }
                     }}
                   >
-                    {visibleEntries.map((entry) => (
+                    {visibleRootEntries.map((entry) => (
                       <SortableGalleryCard
                         key={entry.id}
                         entry={entry}
@@ -2446,6 +2910,7 @@ export default function App() {
                         inlineRenameValue={inlineRenameValue}
                         inlineRenameInputRef={inlineRenameInputRef}
                         onSelect={handleEntrySelect}
+                        sourceFolderHint={sourceFolderByEntryId.get(entry.id) ?? null}
                         onOpen={(item) => void openEntry(item)}
                         onDropEntries={(paths, destinationPath, copyMode) =>
                           void applyPathOperation(paths, destinationPath, copyMode ? 'copy' : 'move')
@@ -2455,6 +2920,7 @@ export default function App() {
                         onInlineRenameCommit={() => void commitInlineRename()}
                         onInlineRenameCancel={cancelInlineRename}
                         onContextMenu={handleContextMenu}
+                        showSourceColumn={showSourceColumn}
                       />
                     ))}
                   </div>
@@ -2470,7 +2936,7 @@ export default function App() {
               {hasMoreEntries && (
                 <div className="load-more-wrap">
                   <button className="win-btn load-more-btn" onClick={handleLoadMoreEntries}>
-                    항목 더 보기 (+{Math.min(ENTRY_PAGE_SIZE, displayEntries.length - visibleEntries.length)})
+                    항목 더 보기 (+{Math.min(ENTRY_PAGE_SIZE, baseDisplayEntries.length - visibleRootEntries.length)})
                   </button>
                 </div>
               )}
@@ -2559,6 +3025,7 @@ export default function App() {
         open={renameModalOpen}
         title="이름 바꾸기"
         defaultName={renameTarget?.name ?? ''}
+        preserveExtension={renameTarget?.kind === 'file'}
         onConfirm={(name) => void handleRenameConfirm(name)}
         onCancel={() => { setRenameModalOpen(false); setRenameTarget(null) }}
       />

@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import * as pdfjs from 'pdfjs-dist/legacy/build/pdf.mjs'
 import { FileItem, MergeResult, MergeSource } from '../types'
-import { toCustomNamePdfPath } from '../utils/path'
+import { normalizePathForComparison, toCustomNamePdfPath } from '../utils/path'
 import { FileNameModal } from './FileNameModal'
 import { ProgressBar } from './ProgressBar'
 
@@ -114,6 +114,7 @@ export function PdfMergeModal({ open, pdfFiles, currentDir, onClose, onMerged, o
   const [error, setError] = useState<string | null>(null)
   const [errorCause, setErrorCause] = useState<string | null>(null)
   const [success, setSuccess] = useState<string | null>(null)
+  const [defaultFileName, setDefaultFileName] = useState('merged.pdf')
   const [fileNameModalOpen, setFileNameModalOpen] = useState(false)
   const loadingPreviewPathsRef = useRef(new Set<string>())
   const selectedPathSetRef = useRef(new Set<string>())
@@ -262,8 +263,51 @@ export function PdfMergeModal({ open, pdfFiles, currentDir, onClose, onMerged, o
     [selectedPaths],
   )
 
+  const cleanupSourceFiles = async (outputPath: string, sourcePaths: string[]) => {
+    const uniqueSourcePaths = Array.from(new Set(sourcePaths))
+    const sourcePathsToRemove = uniqueSourcePaths.filter(
+      (path) => normalizePathForComparison(path) !== normalizePathForComparison(outputPath),
+    )
+    if (!sourcePathsToRemove.length) return []
+
+    const warnings: string[] = []
+    for (const path of sourcePathsToRemove) {
+      try {
+        await invoke('delete_paths', { paths: [path] })
+      } catch (e) {
+        const resolvedDeleteError = resolvePdfError(e, '원본 파일 삭제에 실패했습니다.')
+        if (resolvedDeleteError.cause) {
+          warnings.push(`${path}: ${resolvedDeleteError.message} (원인: ${resolvedDeleteError.cause})`)
+        } else {
+          warnings.push(`${path}: ${resolvedDeleteError.message}`)
+        }
+      }
+    }
+
+    if (!warnings.length) {
+      warnings.push('원본 파일 삭제가 완료되어 병합 파일만 남습니다.')
+    }
+    return warnings
+  }
+
   const handleMergeClick = () => {
     if (selectedPaths.length < 2) return
+    const firstSelectedPath = selectedPaths[0]
+    if (firstSelectedPath) {
+      const firstSelectedFile = fileByPath.get(firstSelectedPath)?.name
+      if (firstSelectedFile) {
+        setDefaultFileName(firstSelectedFile)
+      } else {
+        setDefaultFileName(
+          firstSelectedPath
+            .split(/[\\/]/)
+            .filter(Boolean)
+            .pop() ?? 'merged.pdf',
+        )
+      }
+    } else {
+      setDefaultFileName('merged.pdf')
+    }
     setFileNameModalOpen(true)
   }
 
@@ -275,11 +319,14 @@ export function PdfMergeModal({ open, pdfFiles, currentDir, onClose, onMerged, o
     setSuccess(null)
 
     try {
+      const outputPath = toCustomNamePdfPath(currentDir, fileName, defaultFileName)
       const sources: MergeSource[] = selectedPaths.map((p) => ({ path: p, pages: [] }))
-      const outputPath = toCustomNamePdfPath(currentDir, fileName)
 
       const result = await invoke<MergeResult>('merge_pdf_pages', { sources, outputPath })
-      setSuccess(appendWarningsMessage(`${result.totalPages}개 페이지로 병합 완료: ${fileName}`, result.warnings))
+      const deletionWarnings = await cleanupSourceFiles(outputPath, selectedPaths)
+      const warnings = [...result.warnings, ...deletionWarnings]
+
+      setSuccess(appendWarningsMessage(`${result.totalPages}개 페이지로 병합 완료: ${outputPath}`, warnings))
       onMerged()
     } catch (e) {
       setResolvedError(e, 'PDF 병합에 실패했습니다.')
@@ -493,7 +540,8 @@ export function PdfMergeModal({ open, pdfFiles, currentDir, onClose, onMerged, o
       <FileNameModal
         open={fileNameModalOpen}
         title="병합 파일 이름"
-        defaultName="merged.pdf"
+        defaultName={defaultFileName}
+        preserveExtension
         onConfirm={(name) => void handleMergeConfirm(name)}
         onCancel={() => setFileNameModalOpen(false)}
       />

@@ -37,6 +37,29 @@ function joinPath(directory: string, fileName: string): string {
   return base.endsWith(sep) ? `${base}${fileName}` : `${base}${sep}${fileName}`
 }
 
+function sanitizeFileName(fileName: string): string {
+  const trimmed = fileName.trim().replace(/[\\/]/g, '_').replace(/\0/g, '').trim()
+  return trimmed.length > 0 ? trimmed : 'output'
+}
+
+function splitNameAndExtension(fileName: string): { base: string; extension: string } {
+  const trimmed = fileName.trim()
+  const extensionIndex = trimmed.lastIndexOf('.')
+  if (extensionIndex <= 0 || extensionIndex === trimmed.length - 1) {
+    return { base: trimmed, extension: '' }
+  }
+
+  return {
+    base: trimmed.slice(0, extensionIndex),
+    extension: trimmed.slice(extensionIndex),
+  }
+}
+
+function extensionFrom(fileName: string): string {
+  const candidate = splitNameAndExtension(fileName)
+  return candidate.extension && candidate.extension !== '.' ? candidate.extension : ''
+}
+
 export function getFileDirectory(path: string): string {
   const source = stripWindowsVerbatimPrefix(path)
   const windowsPath = isWindowsPath(source)
@@ -76,15 +99,33 @@ export function toMergedPdfPath(directory: string): string {
   return joinPath(directory, `merged_${stamp}.pdf`)
 }
 
-export function toCustomNamePdfPath(directory: string, fileName: string): string {
-  const trimmedName = fileName
-    .trim()
-    .replace(/[\\/]/g, '_')
-    .replace(/\0/g, '')
-    .trim()
-  const safeName = trimmedName.length > 0 ? trimmedName : 'output'
-  const name = /\.pdf$/i.test(safeName) ? safeName : `${safeName}.pdf`
-  return joinPath(directory, name)
+export function toCustomNamePdfPath(directory: string, fileName: string, defaultFileName = 'output.pdf'): string {
+  const sanitizedName = sanitizeFileName(fileName)
+  const { base, extension } = splitNameAndExtension(sanitizedName)
+
+  const isDefaultReference = defaultFileName === 'output.pdf'
+  if (isDefaultReference) {
+    const resolvedBase = base || 'output'
+    const resolvedExtension = extension || '.pdf'
+    return joinPath(directory, `${resolvedBase}${resolvedExtension}`)
+  }
+
+  const outputName = withPreservedExtension(sanitizedName, defaultFileName, { fallbackExtension: '.pdf' })
+  return joinPath(directory, outputName)
+}
+
+export function withPreservedExtension(
+  fileName: string,
+  referenceName = 'output.pdf',
+  options?: { fallbackExtension?: string },
+): string {
+  const sanitizedName = sanitizeFileName(fileName)
+  const reference = sanitizeFileName(referenceName)
+  const { base } = splitNameAndExtension(sanitizedName)
+  const referenceParts = splitNameAndExtension(reference)
+  const resolvedBase = base || referenceParts.base || 'output'
+  const resolvedExtension = extensionFrom(reference) || options?.fallbackExtension || ''
+  return `${resolvedBase}${resolvedExtension}`
 }
 
 function encodePathSegment(segment: string): string {
