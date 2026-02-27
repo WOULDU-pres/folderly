@@ -2877,21 +2877,25 @@ export default function App() {
               드래그 기본 동작: 이동 (Ctrl/Cmd를 누르면 복사)
             </p>
             <div className="pane-actions">
-              <button
-                className="win-btn"
-                style={{ borderColor: 'var(--border)' }}
-                disabled={previewPdfFiles.length < 2}
-                onClick={() => setMergePdfModalOpen(true)}
-              >
-                PDF 병합
-              </button>
-              <button
-                className="win-btn primary"
-                disabled={selectedFile?.ext.toLowerCase() !== 'pdf'}
-                onClick={() => setPdfModalOpen(true)}
-              >
-                PDF 페이지 추출
-              </button>
+              {pdfModalOpen && (
+                <>
+                  <button
+                    className="win-btn"
+                    style={{ borderColor: 'var(--border)' }}
+                    disabled={previewPdfFiles.length < 2}
+                    onClick={() => setMergePdfModalOpen(true)}
+                  >
+                    PDF 병합
+                  </button>
+                  <button
+                    className="win-btn primary"
+                    disabled={selectedFile?.ext.toLowerCase() !== 'pdf'}
+                    onClick={() => setPdfModalOpen(true)}
+                  >
+                    PDF 페이지 추출
+                  </button>
+                </>
+              )}
             </div>
           </div>
 
