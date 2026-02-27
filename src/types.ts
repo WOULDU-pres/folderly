@@ -51,6 +51,25 @@ export interface MergeResult {
   warnings: string[]
 }
 
+export interface PdfHighlightPoint {
+  x: number
+  y: number
+}
+
+export interface PdfHighlightLine {
+  page: number
+  color: string
+  start: PdfHighlightPoint
+  end: PdfHighlightPoint
+}
+
+export interface SavePdfHighlightsResult {
+  outputPath: string
+  pageCount: number
+  totalLines: number
+  warnings: string[]
+}
+
 export interface BookmarkItem {
   id: string
   name: string

@@ -1,4 +1,7 @@
-use crate::models::{ExtractAndRemoveResult, ExtractResult, MergeResult, MergeSource};
+use crate::models::{
+    ExtractAndRemoveResult, ExtractResult, MergeResult, MergeSource, SavePdfHighlightsLine,
+    SavePdfHighlightsResult,
+};
 use lopdf::{Document, Object, ObjectId};
 use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
@@ -368,6 +371,264 @@ fn merge_document_pages(base: &mut Document, donor: &Document, warnings: &mut Ve
             0
         };
         pages_dict.set("Count", Object::Integer(new_count));
+    }
+}
+
+#[tauri::command]
+pub fn save_pdf_highlights(
+    input_path: String,
+    output_path: String,
+    lines: Vec<SavePdfHighlightsLine>,
+    overwrite: bool,
+) -> Result<SavePdfHighlightsResult, String> {
+    if lines.is_empty() {
+        return Err("No highlights to save. Draw at least one line before saving.".to_string());
+    }
+
+    if !Path::new(&input_path).exists() {
+        return Err(format!("Input PDF does not exist: {input_path}"));
+    }
+
+    if Path::new(&output_path).exists() && !overwrite {
+        return Err(format!("OUTPUT_FILE_EXISTS:{output_path}"));
+    }
+
+    let mut document = Document::load(&input_path).map_err(|e| e.to_string())?;
+    let mut warnings: Vec<String> = Vec::new();
+
+    if document.is_encrypted() {
+        return Err("Encrypted/password-protected PDF is not supported in MVP.".to_string());
+    }
+
+    let page_map = document.get_pages();
+    if page_map.is_empty() {
+        return Err("The source PDF has no pages.".to_string());
+    }
+
+    let mut line_count = 0usize;
+
+    for line in lines {
+        let source_page = line.page;
+        let page_id = match page_map.get(&source_page) {
+            Some(id) => *id,
+            None => {
+                warnings.push(format!(
+                    "Page {source_page} does not exist. Skipping one line."
+                ));
+                continue;
+            }
+        };
+
+        let (page_width, page_height) = match pdf_page_size_points(&document, page_id) {
+            Some(size) => size,
+            None => {
+                warnings.push(format!(
+                    "Could not resolve page box for page {source_page}. Skipping one line."
+                ));
+                continue;
+            }
+        };
+
+        let color = parse_hex_color(&line.color)?;
+        let line_width = 3.0f32;
+        let start_x = clamp((line.start.x * page_width).max(0.0), 0.0, page_width);
+        let end_x = clamp((line.end.x * page_width).max(0.0), 0.0, page_width);
+        let start_y = page_height - clamp(line.start.y * page_height, 0.0, page_height);
+        let end_y = page_height - clamp(line.end.y * page_height, 0.0, page_height);
+
+        let half_width = f64::from(line_width) * 0.75;
+        let annots_x_min = (start_x.min(end_x) - half_width).max(0.0);
+        let annots_y_min = (start_y.min(end_y) - half_width).max(0.0);
+        let annots_x_max = (start_x.max(end_x) + half_width).max(annots_x_min + 0.5);
+        let annots_y_max = (start_y.max(end_y) + half_width).max(annots_y_min + 0.5);
+
+        let mut annotation = lopdf::Dictionary::new();
+        annotation.set("Type", Object::Name(b"Annot".to_vec()));
+        annotation.set("Subtype", Object::Name(b"Line".to_vec()));
+        annotation.set(
+            "C",
+            vec![
+                Object::Real(color.0),
+                Object::Real(color.1),
+                Object::Real(color.2),
+            ],
+        );
+        annotation.set(
+            "L",
+            vec![
+                Object::Real(start_x as f32),
+                Object::Real(start_y as f32),
+                Object::Real(end_x as f32),
+                Object::Real(end_y as f32),
+            ],
+        );
+        annotation.set("BS", {
+            let mut border_style = lopdf::Dictionary::new();
+            border_style.set("Type", Object::Name(b"BS".to_vec()));
+            border_style.set("W", Object::Real(line_width));
+            border_style.set("S", Object::Name(b"S".to_vec()));
+            Object::Dictionary(border_style)
+        });
+        annotation.set(
+            "Rect",
+            vec![
+                Object::Real(annots_x_min as f32),
+                Object::Real(annots_y_min as f32),
+                Object::Real(annots_x_max as f32),
+                Object::Real(annots_y_max as f32),
+            ],
+        );
+        annotation.set("F", Object::Integer(0));
+
+        let annotation_id = document.add_object(Object::Dictionary(annotation));
+        let annotation_ref = Object::Reference(annotation_id);
+
+        let mut existing_annots: Vec<Object> = match document
+            .get_object(page_id)
+            .ok()
+            .and_then(|page_object| page_object.as_dict().ok())
+        {
+            Some(dict) => extract_annots_from_object(&document, dict.get(b"Annots").ok()),
+            _ => Vec::new(),
+        };
+
+        match document.get_object_mut(page_id) {
+            Ok(Object::Dictionary(dict)) => {
+                existing_annots.push(annotation_ref);
+                dict.set("Annots", Object::Array(existing_annots));
+                line_count += 1;
+            }
+            _ => {
+                warnings.push(format!(
+                    "Page {source_page} has unsupported structure. Skipping one line."
+                ));
+                continue;
+            }
+        };
+    }
+
+    document.prune_objects();
+    document.renumber_objects();
+    document.compress();
+    let saving_to_original = output_path == input_path;
+    let temporary_output = if saving_to_original {
+        format!("{input_path}.highlight_tmp")
+    } else {
+        output_path.clone()
+    };
+
+    document
+        .save(&temporary_output)
+        .map_err(|e| format!("Failed to save highlighted PDF: {e}"))?;
+
+    if saving_to_original {
+        let backup_suffix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or(0);
+        let backup_path = format!("{input_path}.highlight_bak.{backup_suffix}");
+        if let Err(e) = std::fs::rename(&input_path, &backup_path) {
+            let _ = std::fs::remove_file(&temporary_output);
+            return Err(format!("Failed to create backup before overwrite: {e}."));
+        }
+
+        if let Err(e) = std::fs::rename(&temporary_output, &input_path) {
+            let _ = std::fs::rename(&backup_path, &input_path);
+            return Err(format!(
+                "Failed to replace original with highlighted PDF: {e}. \
+                 Recovery: original file is restored from {backup_path}."
+            ));
+        }
+
+        if let Err(e) = std::fs::remove_file(&backup_path) {
+            warnings.push(format!(
+                "Could not delete backup file {backup_path}: {e}"
+            ));
+        }
+    }
+
+    Ok(SavePdfHighlightsResult {
+        output_path,
+        page_count: page_map.len(),
+        total_lines: line_count,
+        warnings,
+    })
+}
+
+fn clamp(value: f64, min: f64, max: f64) -> f64 {
+    if value < min {
+        min
+    } else if value > max {
+        max
+    } else {
+        value
+    }
+}
+
+fn parse_hex_color(color: &str) -> Result<(f32, f32, f32), String> {
+    let trimmed = color.trim().trim_start_matches('#');
+    if trimmed.len() != 6 {
+        return Err(format!("Unsupported highlight color format: {color}"));
+    }
+
+    let r = u8::from_str_radix(&trimmed[0..2], 16)
+        .map_err(|_| format!("Unsupported highlight color format: {color}"))?;
+    let g = u8::from_str_radix(&trimmed[2..4], 16)
+        .map_err(|_| format!("Unsupported highlight color format: {color}"))?;
+    let b = u8::from_str_radix(&trimmed[4..6], 16)
+        .map_err(|_| format!("Unsupported highlight color format: {color}"))?;
+
+    Ok((
+        f32::from(r) / 255.0,
+        f32::from(g) / 255.0,
+        f32::from(b) / 255.0,
+    ))
+}
+
+fn extract_annots_from_object(document: &Document, obj: Option<&Object>) -> Vec<Object> {
+    match obj {
+        Some(Object::Array(array)) => array.iter().cloned().collect(),
+        Some(Object::Reference(object_id)) => match document
+            .get_object(*object_id)
+            .ok()
+            .and_then(|maybe_object| maybe_object.as_array().ok().cloned())
+        {
+            Some(array) => array.to_vec(),
+            None => vec![Object::Reference(*object_id)],
+        },
+        _ => Vec::new(),
+    }
+}
+
+fn pdf_page_size_points(document: &Document, page_id: ObjectId) -> Option<(f64, f64)> {
+    let page_obj = document.get_object(page_id).ok()?;
+    let dict = page_obj.as_dict().ok()?;
+    let media_box = dict
+        .get(b"MediaBox")
+        .ok()
+        .or_else(|| dict.get(b"CropBox").ok())
+        .and_then(as_f32_rect)?;
+
+    Some(media_box)
+}
+
+fn as_f32_rect(obj: &Object) -> Option<(f64, f64)> {
+    let array = obj.as_array().ok()?;
+    if array.len() < 4 {
+        return None;
+    }
+    let x0 = as_f64(&array[0])?;
+    let y0 = as_f64(&array[1])?;
+    let x1 = as_f64(&array[2])?;
+    let y1 = as_f64(&array[3])?;
+    Some(((x1 - x0).abs(), (y1 - y0).abs()))
+}
+
+fn as_f64(object: &Object) -> Option<f64> {
+    match object {
+        Object::Integer(value) => Some(*value as f64),
+        Object::Real(value) => Some(*value as f64),
+        _ => None,
     }
 }
 

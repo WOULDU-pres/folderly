@@ -62,3 +62,28 @@ pub struct MergeResult {
     pub total_pages: usize,
     pub warnings: Vec<String>,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SavePdfHighlightsLine {
+    pub page: u32,
+    pub color: String,
+    pub start: PdfPoint,
+    pub end: PdfPoint,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PdfPoint {
+    pub x: f64,
+    pub y: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SavePdfHighlightsResult {
+    pub output_path: String,
+    pub page_count: usize,
+    pub total_lines: usize,
+    pub warnings: Vec<String>,
+}

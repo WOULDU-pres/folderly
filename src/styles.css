@@ -1203,6 +1203,27 @@ select {
   gap: 8px;
 }
 
+.highlight-color-picker {
+  display: inline-flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.highlight-color-swatch {
+  width: 24px;
+  height: 24px;
+  border-radius: 999px;
+  border: 2px solid transparent;
+  padding: 0;
+  cursor: pointer;
+  transition: transform 140ms ease, border-color 140ms ease;
+}
+
+.highlight-color-swatch.active {
+  transform: scale(1.08);
+  border-color: var(--text);
+}
+
 .meta-pill {
   border: 1px solid var(--border);
   border-radius: 999px;
@@ -1328,6 +1349,10 @@ select {
   margin-bottom: 0;
 }
 .pdf-large-page img { display: block; width: 100%; height: auto; }
+.pdf-page-canvas {
+  position: relative;
+  line-height: 0;
+}
 .pdf-large-page .page-label {
   text-align: center;
   padding: 6px;
@@ -1366,6 +1391,24 @@ select {
 @keyframes skeleton-shimmer {
   0% { background-position: 200% 0; }
   100% { background-position: -200% 0; }
+}
+
+.pdf-highlight-overlay {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+
+.pdf-highlight-line {
+  vector-effect: non-scaling-stroke;
+  stroke-width: 3;
+  stroke-linecap: round;
+}
+
+.pdf-highlight-dot {
+  vector-effect: non-scaling-stroke;
 }
 
 /* Header & Footer */

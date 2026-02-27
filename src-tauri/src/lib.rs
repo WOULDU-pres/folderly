@@ -39,6 +39,7 @@ pub fn run() {
             pdf::extract_pdf_pages,
             pdf::extract_and_remove_pdf_pages,
             pdf::merge_pdf_pages,
+            pdf::save_pdf_highlights,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

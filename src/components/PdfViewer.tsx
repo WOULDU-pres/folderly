@@ -1,7 +1,15 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent } from 'react'
 import { invoke } from '@tauri-apps/api/core'
-import { ExtractAndRemoveResult, ExtractResult, FileItem } from '../types'
+import { ExtractAndRemoveResult, ExtractResult, FileItem, SavePdfHighlightsResult } from '../types'
 import { getFileDirectory, getFileNameWithoutExt, toCustomNamePdfPath, withPreservedExtension } from '../utils/path'
+import {
+  composePdfRotation,
+  HIGHLIGHT_LINE_MARGIN,
+  rotatePointFromCanonical,
+  rotatePointToCanonical,
+  toRelativePointFromRect,
+  type NormalizedPoint,
+} from '../utils/pdfHighlight'
 import { FileNameModal } from './FileNameModal'
 import { ProgressBar } from './ProgressBar'
 import { PDF_EXTRACT_KEYWORD_SUGGESTIONS } from '../utils/keywordSuggestion'
@@ -17,7 +25,8 @@ type PdfDocumentProxy = {
   numPages: number
   destroy: () => Promise<void>
   getPage: (pageNumber: number) => Promise<{
-    getViewport: (params: { scale: number }) => { width: number; height: number }
+    rotate?: number
+    getViewport: (params: { scale: number; rotation?: number }) => { width: number; height: number }
     render: (params: { canvasContext: CanvasRenderingContext2D; viewport: { width: number; height: number } }) => {
       promise: Promise<void>
     }
@@ -43,11 +52,20 @@ type ErrorWithCause = Error & { cause?: unknown }
 
 type PageSourceMap = Record<number, number>
 
+type HighlightLine = {
+  id: string
+  page: number
+  color: string
+  start: NormalizedPoint
+  end: NormalizedPoint
+}
+
 const ZOOM_MIN = 200
 const ZOOM_MAX = 1400
 const ZOOM_DEFAULT = 600
 const ZOOM_STEP = 25
 const ZOOM_DOUBLE_CLICK = 900
+const HIGHLIGHT_COLORS = ['#fde047', '#38bdf8', '#f97316', '#34d399', '#f43f5e', '#a78bfa'] as const
 
 function isClientPointInsideElement(
   element: HTMLElement,
@@ -191,6 +209,7 @@ export function PdfViewer({ open, file, currentDir, onClose, onExtracted, onRena
   const [pageCount, setPageCount] = useState(0)
   const [thumbs, setThumbs] = useState<Record<number, string>>({})
   const [largePreviews, setLargePreviews] = useState<Record<number, string>>({})
+  const [pageDisplayRotations, setPageDisplayRotations] = useState<Record<number, 0 | 90 | 180 | 270>>({})
   const [selectedPages, setSelectedPages] = useState<number[]>([])
   const [activePage, setActivePage] = useState(1)
   const [loadVersion, setLoadVersion] = useState(0)
@@ -198,12 +217,18 @@ export function PdfViewer({ open, file, currentDir, onClose, onExtracted, onRena
   const [fileNameModalOpen, setFileNameModalOpen] = useState(false)
   const [renameModalOpen, setRenameModalOpen] = useState(false)
   const [zoom, setZoom] = useState(ZOOM_DEFAULT)
+  const [rotation, setRotation] = useState(0)
   const [pendingExtract, setPendingExtract] = useState<{ fileName: string; pages: number[] } | null>(null)
+  const [highlightColor, setHighlightColor] = useState<string>(HIGHLIGHT_COLORS[0])
+  const [highlightLines, setHighlightLines] = useState<Record<number, HighlightLine[]>>({})
+  const [savingHighlights, setSavingHighlights] = useState(false)
 
   // Internal file state - survives temporary null prop during rename/refresh
   const [viewerFile, setViewerFile] = useState<FileItem | null>(null)
   const skipReloadRef = useRef(false)
   const pageSourceMapRef = useRef<PageSourceMap>({})
+  const lastRenderedFileSignatureRef = useRef<string | null>(null)
+  const lastRenderedRotationRef = useRef(0)
 
   const rightPaneRef = useRef<HTMLDivElement>(null)
   const thumbRefs = useRef<Record<number, HTMLDivElement | null>>({})
@@ -213,7 +238,6 @@ export function PdfViewer({ open, file, currentDir, onClose, onExtracted, onRena
   const pdfDocRef = useRef<PdfDocumentProxy | null>(null)
   const lastSelectedPageRef = useRef<number | null>(null)
   const thumbsRef = useRef<Record<number, string>>({})
-  const lastLoadedFilePathRef = useRef<string | null>(null)
 
   useEffect(() => {
     thumbsRef.current = thumbs
@@ -228,6 +252,7 @@ export function PdfViewer({ open, file, currentDir, onClose, onExtracted, onRena
     const nextPageSourceMap: PageSourceMap = {}
     const nextThumbs: Record<number, string> = {}
     const nextLargePreviews: Record<number, string> = {}
+    const nextPageDisplayRotations: Record<number, 0 | 90 | 180 | 270> = {}
     let removedBefore = 0
 
     for (let currentPage = 1; currentPage <= pageCount; currentPage += 1) {
@@ -249,13 +274,19 @@ export function PdfViewer({ open, file, currentDir, onClose, onExtracted, onRena
       if (largeValue) {
         nextLargePreviews[nextPage] = largeValue
       }
+
+      const pageRotationValue = pageDisplayRotations[currentPage]
+      if (pageRotationValue !== undefined) {
+        nextPageDisplayRotations[nextPage] = pageRotationValue
+      }
     }
 
     setThumbs(nextThumbs)
     setLargePreviews(nextLargePreviews)
+    setPageDisplayRotations(nextPageDisplayRotations)
 
     pageSourceMapRef.current = nextPageSourceMap
-  }, [pageCount, thumbs, largePreviews])
+  }, [pageCount, thumbs, largePreviews, pageDisplayRotations])
 
   // Sync viewerFile from prop: only update when prop is non-null
   useEffect(() => {
@@ -267,6 +298,9 @@ export function PdfViewer({ open, file, currentDir, onClose, onExtracted, onRena
       lastSelectedPageRef.current = null
       setPendingScrollPage(null)
       setSelectedPages([])
+      setHighlightLines({})
+      setPageDisplayRotations({})
+      setRotation(0)
     }
   }, [open, file])
 
@@ -285,6 +319,12 @@ export function PdfViewer({ open, file, currentDir, onClose, onExtracted, onRena
         description: '페이지 추출/삭제 결과를 파일에 반영하고 있습니다.',
       }
     }
+    if (savingHighlights) {
+      return {
+        title: 'PDF 하이라이트를 저장하는 중...',
+        description: '하이라이트 데이터가 파일로 저장되고 있습니다.',
+      }
+    }
     if (renaming) {
       return {
         title: 'PDF 이름을 변경하는 중...',
@@ -298,9 +338,15 @@ export function PdfViewer({ open, file, currentDir, onClose, onExtracted, onRena
       }
     }
     return null
-  }, [extracting, renaming, loading])
+  }, [extracting, savingHighlights, renaming, loading])
 
-  const interactionLocked = extracting || renaming
+  const interactionLocked = extracting || renaming || savingHighlights
+
+  const hasHighlights = useMemo(() => {
+    return Object.values(highlightLines).some((lines) => lines.length > 0)
+  }, [highlightLines])
+
+  const defaultExtractName = viewerFile ? `${getFileNameWithoutExt(viewerFile.path)}_selected.pdf` : 'extracted.pdf'
 
   useEffect(() => {
     if (!onBusyChange) return
@@ -316,7 +362,7 @@ export function PdfViewer({ open, file, currentDir, onClose, onExtracted, onRena
     return () => onBusyChange?.(null)
   }, [onBusyChange])
 
-  // Load PDF thumbnails - depends on viewerFile path
+  // Load PDF thumbnails and rendered pages - depends on viewerFile path + rotation
   useEffect(() => {
     if (skipReloadRef.current) {
       skipReloadRef.current = false
@@ -329,7 +375,12 @@ export function PdfViewer({ open, file, currentDir, onClose, onExtracted, onRena
     let cancelled = false
 
     async function loadPdf() {
-      const canReuseThumbs = lastLoadedFilePathRef.current === targetFile.path && Object.keys(thumbsRef.current).length > 0
+      const signature = `${targetFile.path}#${loadVersion}`
+      const isSameSession = lastRenderedFileSignatureRef.current === signature
+      const canReuseThumbs =
+        isSameSession &&
+        lastRenderedRotationRef.current === rotation &&
+        Object.keys(thumbsRef.current).length > 0
       setLoading(true)
       setError(null)
       setErrorCause(null)
@@ -339,12 +390,21 @@ export function PdfViewer({ open, file, currentDir, onClose, onExtracted, onRena
         thumbsRef.current = {}
       }
       setLargePreviews({})
-      setSelectedPages([])
+      if (!isSameSession) {
+        setSelectedPages([])
+        setHighlightLines({})
+        setPageDisplayRotations({})
+      }
       lastSelectedPageRef.current = null
-      setActivePage(1)
+      if (!isSameSession) {
+        setActivePage(1)
+      }
       setFileNameModalOpen(false)
       setPendingExtract(null)
-      setZoom(ZOOM_DEFAULT)
+      if (!isSameSession) {
+        setZoom(ZOOM_DEFAULT)
+        setRotation(0)
+      }
 
       if (pdfDocRef.current) {
         await pdfDocRef.current.destroy()
@@ -379,7 +439,13 @@ export function PdfViewer({ open, file, currentDir, onClose, onExtracted, onRena
           if (cancelled) break
           if (thumbsRef.current[pageNumber]) continue
           const page = await pdfDocument.getPage(pageNumber)
-          const viewport = page.getViewport({ scale: 0.35 })
+          const effectiveRotation = composePdfRotation(page.rotate ?? 0, rotation)
+          setPageDisplayRotations((prev) => (
+            prev[pageNumber] === effectiveRotation
+              ? prev
+              : { ...prev, [pageNumber]: effectiveRotation }
+          ))
+          const viewport = page.getViewport({ scale: 0.35, rotation: effectiveRotation })
           const canvas = window.document.createElement('canvas')
           const context = canvas.getContext('2d')
           if (!context) continue
@@ -395,7 +461,8 @@ export function PdfViewer({ open, file, currentDir, onClose, onExtracted, onRena
           setThumbs((prev) => ({ ...prev, [pageNumber]: renderedThumb }))
         }
 
-        lastLoadedFilePathRef.current = targetFile.path
+        lastRenderedFileSignatureRef.current = signature
+        lastRenderedRotationRef.current = rotation
       } catch (e) {
         if (!cancelled) {
           setResolvedError(e, 'PDF 미리보기에 실패했습니다.')
@@ -415,10 +482,11 @@ export function PdfViewer({ open, file, currentDir, onClose, onExtracted, onRena
       }
       setThumbs({})
       setLargePreviews({})
+      setPageDisplayRotations({})
       thumbsRef.current = {}
       pageSourceMapRef.current = {}
     }
-  }, [open, viewerFile?.path, loadVersion, setResolvedError])
+  }, [open, viewerFile?.path, rotation, loadVersion, setResolvedError])
 
   // Render large preview lazily via IntersectionObserver
   const renderLargePage = useCallback(async (pageNumber: number) => {
@@ -428,7 +496,13 @@ export function PdfViewer({ open, file, currentDir, onClose, onExtracted, onRena
     if (!sourcePage) return
     try {
       const page = await doc.getPage(sourcePage)
-      const viewport = page.getViewport({ scale: 2.0 })
+      const effectiveRotation = composePdfRotation(page.rotate ?? 0, rotation)
+      setPageDisplayRotations((prev) => (
+        prev[pageNumber] === effectiveRotation
+          ? prev
+          : { ...prev, [pageNumber]: effectiveRotation }
+      ))
+      const viewport = page.getViewport({ scale: 2.0, rotation: effectiveRotation })
       const canvas = window.document.createElement('canvas')
       const context = canvas.getContext('2d')
       if (!context) return
@@ -441,7 +515,7 @@ export function PdfViewer({ open, file, currentDir, onClose, onExtracted, onRena
     } catch {
       // Silently skip failed page renders
     }
-  }, [])
+  }, [rotation])
 
   // Setup IntersectionObserver for large pages
   useEffect(() => {
@@ -604,6 +678,10 @@ export function PdfViewer({ open, file, currentDir, onClose, onExtracted, onRena
     [applyZoomWithAnchor],
   )
 
+  const cycleRotation = useCallback(() => {
+    setRotation((prev) => (prev + 90) % 360)
+  }, [])
+
   // Ctrl/Cmd + Scroll to zoom (capture on modal card to avoid being blocked by inner scroll targets)
   useEffect(() => {
     const container = viewerCardRef.current
@@ -670,6 +748,55 @@ export function PdfViewer({ open, file, currentDir, onClose, onExtracted, onRena
       return idx >= 0 ? idx + 1 : 0
     },
     [selectedPages],
+  )
+
+  const toCanonicalPoint = useCallback(
+    (point: NormalizedPoint, pageRotation: number): NormalizedPoint => rotatePointToCanonical(point, pageRotation),
+    [],
+  )
+
+  const toDisplayPoint = useCallback(
+    (point: NormalizedPoint, pageRotation: number): NormalizedPoint => rotatePointFromCanonical(point, pageRotation),
+    [],
+  )
+
+  const handleLineClick = useCallback(
+    (event: MouseEvent<HTMLDivElement>, pageNumber: number) => {
+      if (interactionLocked) return
+      if (event.detail > 1) return
+
+      const lineCanvas = event.currentTarget.querySelector<HTMLElement>('.pdf-page-canvas')
+      const clickTarget = event.target as Node | null
+      if (!lineCanvas || !clickTarget || !lineCanvas.contains(clickTarget)) return
+
+      const pageRotation = pageDisplayRotations[pageNumber] ?? composePdfRotation(0, rotation)
+      const displayPoint = toRelativePointFromRect(
+        event.clientX,
+        event.clientY,
+        lineCanvas.getBoundingClientRect(),
+      )
+      const line: HighlightLine = {
+        id: `highlight-${Date.now()}-${pageNumber}`,
+        page: pageNumber,
+        color: highlightColor,
+        start: toCanonicalPoint({ x: HIGHLIGHT_LINE_MARGIN, y: displayPoint.y }, pageRotation),
+        end: toCanonicalPoint({ x: 1 - HIGHLIGHT_LINE_MARGIN, y: displayPoint.y }, pageRotation),
+      }
+
+      setHighlightLines((current) => {
+        const existing = current[pageNumber] ?? []
+        return {
+          ...current,
+          [pageNumber]: [...existing, line],
+        }
+      })
+      setTimeout(() => {
+        setActivePage(pageNumber)
+        scrollToPage(pageNumber)
+      }, 0)
+      event.preventDefault()
+    },
+    [highlightColor, interactionLocked, pageDisplayRotations, rotation, scrollToPage, toCanonicalPoint],
   )
 
   const getRangePages = useCallback((start: number, end: number): number[] => {
@@ -800,7 +927,48 @@ export function PdfViewer({ open, file, currentDir, onClose, onExtracted, onRena
     }
   }
 
-  const defaultExtractName = viewerFile ? `${getFileNameWithoutExt(viewerFile.path)}_selected.pdf` : 'extracted.pdf'
+  const doSaveHighlights = useCallback(async () => {
+    if (!viewerFile) return
+    if (!hasHighlights) {
+      setError('저장할 하이라이트가 없습니다.')
+      setErrorCause(null)
+      return
+    }
+
+    const outputPath = viewerFile.path
+    const data = Object.entries(highlightLines).flatMap(([page, lines]) =>
+      lines.map((line) => ({
+          page: Number(page),
+          start: line.start,
+          end: line.end,
+          color: line.color,
+      })),
+    )
+
+    setError(null)
+    setErrorCause(null)
+    setSuccess(null)
+    setSavingHighlights(true)
+
+    try {
+      const result = await invoke<SavePdfHighlightsResult>('save_pdf_highlights', {
+        inputPath: viewerFile.path,
+        outputPath,
+        lines: data,
+        overwrite: true,
+      })
+      setSuccess(
+        `현재 파일에 하이라이트를 덮어썼습니다: ${result.outputPath} (${result.totalLines}개 선)`,
+      )
+      if (result.warnings.length) {
+        setErrorCause(appendWarningsMessage('일부 페이지가 비어 있거나 잘못된 항목은 저장되지 않았습니다.', result.warnings))
+      }
+    } catch (errorValue) {
+      setResolvedError(errorValue, '하이라이트 저장에 실패했습니다.')
+    } finally {
+      setSavingHighlights(false)
+    }
+  }, [highlightLines, hasHighlights, viewerFile, setResolvedError])
 
   const handleRenameConfirm = async (newName: string) => {
     if (!viewerFile) return
@@ -850,6 +1018,20 @@ export function PdfViewer({ open, file, currentDir, onClose, onExtracted, onRena
         {/* Toolbar */}
         {isPdf && (
           <div className="modal-toolbar" style={{ padding: '0 16px 4px', gap: '8px', flexWrap: 'wrap' }}>
+            <div className="highlight-color-picker" aria-label="하이라이트 색상 선택">
+              {HIGHLIGHT_COLORS.map((color) => (
+                <button
+                  key={color}
+                  type="button"
+                  className={`highlight-color-swatch ${highlightColor === color ? 'active' : ''}`}
+                  style={{ background: color }}
+                  onClick={() => setHighlightColor(color)}
+                  title={color}
+                  aria-label={`하이라이트 색상 ${color}`}
+                />
+              ))}
+            </div>
+
             <button className="ghost" onClick={selectAll} disabled={loading || pageCount === 0 || interactionLocked}>
               전체 선택
             </button>
@@ -857,6 +1039,9 @@ export function PdfViewer({ open, file, currentDir, onClose, onExtracted, onRena
               선택 해제
             </button>
             <span className="meta-pill">{selectedCountLabel}</span>
+            <button className="ghost" onClick={cycleRotation} disabled={loading || interactionLocked} title="90도 회전">
+              회전 {rotation}°
+            </button>
 
             <div style={{ flex: 1 }} />
 
@@ -873,6 +1058,13 @@ export function PdfViewer({ open, file, currentDir, onClose, onExtracted, onRena
 
             <button className="primary" onClick={handleExtractClick} disabled={!canExtract}>
               {extracting ? '추출 중...' : '선택 추출'}
+            </button>
+            <button
+              className="ghost"
+              onClick={() => void doSaveHighlights()}
+              disabled={!hasHighlights || interactionLocked || savingHighlights}
+            >
+              {savingHighlights ? '하이라이트 저장 중...' : '하이라이트 저장'}
             </button>
           </div>
         )}
@@ -931,6 +1123,8 @@ export function PdfViewer({ open, file, currentDir, onClose, onExtracted, onRena
               {Array.from({ length: pageCount }, (_, i) => i + 1).map((pageNumber) => {
                 const selected = selectedPages.includes(pageNumber)
                 const orderNum = selectionIndex(pageNumber)
+                const pageLines = highlightLines[pageNumber] ?? []
+                const pageRotation = pageDisplayRotations[pageNumber] ?? composePdfRotation(0, rotation)
 
                 return (
                   <div
@@ -940,6 +1134,7 @@ export function PdfViewer({ open, file, currentDir, onClose, onExtracted, onRena
                     className={`pdf-large-page ${selected ? 'selected' : ''}`}
                     style={{ width: `${zoom}px` }}
                     onClick={(event) => {
+                      handleLineClick(event, pageNumber)
                       togglePage(pageNumber, { shift: event.shiftKey, ctrl: event.ctrlKey || event.metaKey })
                       scrollToPage(pageNumber)
                     }}
@@ -954,11 +1149,32 @@ export function PdfViewer({ open, file, currentDir, onClose, onExtracted, onRena
                       }
                     }}
                   >
-                    {largePreviews[pageNumber] ? (
-                      <img src={largePreviews[pageNumber]} alt={`Page ${pageNumber}`} />
-                    ) : (
-                      <div className="pdf-page-skeleton" style={{ width: `${zoom}px` }} />
-                    )}
+                    <div className="pdf-page-canvas">
+                      {largePreviews[pageNumber] ? (
+                        <img src={largePreviews[pageNumber]} alt={`Page ${pageNumber}`} />
+                      ) : (
+                        <div className="pdf-page-skeleton" style={{ width: `${zoom}px` }} />
+                      )}
+                      {pageLines.length > 0 && (
+                        <svg className="pdf-highlight-overlay" viewBox="0 0 100 100" preserveAspectRatio="none">
+                          {pageLines.map((line) => {
+                            const start = toDisplayPoint(line.start, pageRotation)
+                            const end = toDisplayPoint(line.end, pageRotation)
+                            return (
+                              <line
+                                key={line.id}
+                                x1={start.x * 100}
+                                y1={start.y * 100}
+                                x2={end.x * 100}
+                                y2={end.y * 100}
+                                className="pdf-highlight-line"
+                                stroke={line.color}
+                              />
+                            )
+                          })}
+                        </svg>
+                      )}
+                    </div>
                     <div className="page-label">Page {pageNumber}</div>
                     <span className="selection-corner-badge">{orderNum > 0 ? orderNum : ''}</span>
                   </div>
