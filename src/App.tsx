@@ -1752,6 +1752,10 @@ export default function App() {
 
   async function openSecondaryWindow() {
     if (isOpeningSecondaryWindow) return
+    if (!isTauriDesktopRuntime()) {
+      setError('새 창 기능은 데스크톱 앱(Tauri)에서만 사용할 수 있습니다.')
+      return
+    }
 
     setIsOpeningSecondaryWindow(true)
     try {
@@ -2736,10 +2740,16 @@ export default function App() {
         </button>
         <button
           className="win-btn"
-          disabled={isOpeningSecondaryWindow}
+          disabled={isOpeningSecondaryWindow || !isTauriDesktopRuntime()}
           onClick={() => void openSecondaryWindow()}
           aria-busy={isOpeningSecondaryWindow}
-          title={isOpeningSecondaryWindow ? '새 창을 여는 중입니다.' : '새 창'}
+          title={
+            !isTauriDesktopRuntime()
+              ? '데스크톱 앱(Tauri)에서만 새 창을 열 수 있습니다.'
+              : isOpeningSecondaryWindow
+                ? '새 창을 여는 중입니다.'
+                : '새 창'
+          }
         >
           <Monitor size={15} /> {isOpeningSecondaryWindow ? '열기 중...' : '새 창'}
         </button>

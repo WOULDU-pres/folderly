@@ -59,7 +59,7 @@ pub fn clear_shared_clipboard(
 }
 
 #[tauri::command]
-pub fn open_second_window(app: AppHandle) -> Result<String, String> {
+pub async fn open_second_window(app: AppHandle) -> Result<String, String> {
     if let Some(window) = app.get_webview_window(SECONDARY_WINDOW_LABEL) {
         let _ = window.show();
         let _ = window.unminimize();
