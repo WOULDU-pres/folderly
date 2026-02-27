@@ -738,12 +738,12 @@ export function PdfViewer({ open, file, currentDir, onClose, onExtracted, onRena
   // Ctrl/Cmd + Scroll to zoom (capture on modal card to avoid being blocked by inner scroll targets)
   useEffect(() => {
     const container = viewerCardRef.current
-    const pane = rightPaneRef.current
-    if (!open || !container) return
+    if (!open || !isPdf || !container) return
 
     const handleWheel = (event: WheelEvent) => {
       const shouldZoom = event.ctrlKey || event.metaKey
       if (!shouldZoom) return
+      const pane = rightPaneRef.current
       if (!pane) return
 
       const targetNode = event.target as Node | null
@@ -768,7 +768,7 @@ export function PdfViewer({ open, file, currentDir, onClose, onExtracted, onRena
 
     document.addEventListener('wheel', handleWheel, { passive: false, capture: true })
     return () => document.removeEventListener('wheel', handleWheel, { capture: true })
-  }, [open, interactionLocked, updateZoomWithAnchor])
+  }, [open, isPdf, interactionLocked, updateZoomWithAnchor])
 
   const selectAll = () => {
     if (interactionLocked) return
