@@ -5,8 +5,8 @@ export type NormalizedPoint = {
 
 // 10% margin on both sides => visible line spans 80% of page width
 export const HIGHLIGHT_LINE_MARGIN = 0.1
-// Previous highlight thickness was 3px; request is 3x wider.
-export const HIGHLIGHT_STROKE_WIDTH = 9
+// Doubled from the previous 9px thickness.
+export const HIGHLIGHT_STROKE_WIDTH = 18
 // Keep text readable under marker strokes.
 export const HIGHLIGHT_STROKE_OPACITY = 0.35
 

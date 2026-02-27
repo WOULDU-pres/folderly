@@ -381,7 +381,7 @@ pub fn save_pdf_highlights(
     lines: Vec<SavePdfHighlightsLine>,
     overwrite: bool,
 ) -> Result<SavePdfHighlightsResult, String> {
-    const HIGHLIGHT_LINE_WIDTH: f32 = 9.0;
+    const HIGHLIGHT_LINE_WIDTH: f32 = 18.0;
     const HIGHLIGHT_OPACITY: f32 = 0.35;
 
     if lines.is_empty() {

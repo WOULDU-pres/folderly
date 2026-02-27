@@ -1403,7 +1403,7 @@ select {
 
 .pdf-highlight-line {
   vector-effect: non-scaling-stroke;
-  stroke-width: 9;
+  stroke-width: 18;
   stroke-opacity: 0.35;
   stroke-linecap: round;
   mix-blend-mode: multiply;

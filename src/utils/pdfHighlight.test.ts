@@ -77,7 +77,7 @@ describe('pdfHighlight rotation mapping', () => {
   })
 
   it('uses 3x stroke width with semi-transparent opacity', () => {
-    expect(HIGHLIGHT_STROKE_WIDTH).toBe(9)
+    expect(HIGHLIGHT_STROKE_WIDTH).toBe(18)
     expect(HIGHLIGHT_STROKE_OPACITY).toBeCloseTo(0.35, 6)
   })
 })
