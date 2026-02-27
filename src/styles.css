@@ -1229,6 +1229,7 @@ select {
   display: grid;
   grid-template-columns: 220px 1fr;
   min-height: 0;
+  min-width: 0;
   border-top: 1px solid var(--border);
   border-bottom: 1px solid var(--border);
 }
@@ -1244,12 +1245,9 @@ select {
 }
 
 .pdf-reading-pane {
-  overflow-y: auto;
+  overflow: auto;
   padding: 24px;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 20px;
+  min-width: 0;
   background: var(--bg-pdf-reading);
 }
 
@@ -1323,6 +1321,11 @@ select {
   overflow: hidden;
   position: relative;
   flex-shrink: 0;
+  margin: 0 auto 20px;
+}
+
+.pdf-large-page:last-child {
+  margin-bottom: 0;
 }
 .pdf-large-page img { display: block; width: 100%; height: auto; }
 .pdf-large-page .page-label {

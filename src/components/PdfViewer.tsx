@@ -43,6 +43,12 @@ type ErrorWithCause = Error & { cause?: unknown }
 
 type PageSourceMap = Record<number, number>
 
+const ZOOM_MIN = 200
+const ZOOM_MAX = 1400
+const ZOOM_DEFAULT = 600
+const ZOOM_STEP = 25
+const ZOOM_DOUBLE_CLICK = 900
+
 function createPageSourceMap(pageCount: number): PageSourceMap {
   const map: PageSourceMap = {}
   for (let page = 1; page <= pageCount; page += 1) {
@@ -178,7 +184,7 @@ export function PdfViewer({ open, file, currentDir, onClose, onExtracted, onRena
   const [pendingScrollPage, setPendingScrollPage] = useState<number | null>(null)
   const [fileNameModalOpen, setFileNameModalOpen] = useState(false)
   const [renameModalOpen, setRenameModalOpen] = useState(false)
-  const [zoom, setZoom] = useState(600)
+  const [zoom, setZoom] = useState(ZOOM_DEFAULT)
   const [pendingExtract, setPendingExtract] = useState<{ fileName: string; pages: number[] } | null>(null)
 
   // Internal file state - survives temporary null prop during rename/refresh
@@ -325,7 +331,7 @@ export function PdfViewer({ open, file, currentDir, onClose, onExtracted, onRena
       setActivePage(1)
       setFileNameModalOpen(false)
       setPendingExtract(null)
-      setZoom(600)
+      setZoom(ZOOM_DEFAULT)
 
       if (pdfDocRef.current) {
         await pdfDocRef.current.destroy()
@@ -532,25 +538,79 @@ export function PdfViewer({ open, file, currentDir, onClose, onExtracted, onRena
 
   const viewerCardRef = useRef<HTMLDivElement>(null)
 
+  const applyZoomWithAnchor = useCallback(
+    (
+      resolver: (prev: number) => number,
+      anchorClientPoint?: { clientX: number; clientY: number },
+    ) => {
+      if (interactionLocked) return
+
+      const pane = rightPaneRef.current
+      setZoom((prev) => {
+        const next = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, resolver(prev)))
+        if (!pane || next === prev) return next
+
+        const paneRect = pane.getBoundingClientRect()
+        const anchorX = anchorClientPoint?.clientX ?? paneRect.left + paneRect.width / 2
+        const anchorY = anchorClientPoint?.clientY ?? paneRect.top + paneRect.height / 2
+        const relativeX = Math.min(Math.max(anchorX - paneRect.left, 0), pane.clientWidth)
+        const relativeY = Math.min(Math.max(anchorY - paneRect.top, 0), pane.clientHeight)
+        const contentX = pane.scrollLeft + relativeX
+        const contentY = pane.scrollTop + relativeY
+        const scale = next / prev
+
+        window.requestAnimationFrame(() => {
+          const targetLeft = contentX * scale - relativeX
+          const targetTop = contentY * scale - relativeY
+          const maxLeft = Math.max(0, pane.scrollWidth - pane.clientWidth)
+          const maxTop = Math.max(0, pane.scrollHeight - pane.clientHeight)
+          pane.scrollLeft = Math.min(maxLeft, Math.max(0, targetLeft))
+          pane.scrollTop = Math.min(maxTop, Math.max(0, targetTop))
+        })
+
+        return next
+      })
+    },
+    [interactionLocked],
+  )
+
+  const updateZoomWithAnchor = useCallback(
+    (delta: number, anchorClientPoint?: { clientX: number; clientY: number }) => {
+      applyZoomWithAnchor((prev) => prev + delta, anchorClientPoint)
+    },
+    [applyZoomWithAnchor],
+  )
+
+  const toggleZoomWithAnchor = useCallback(
+    (anchorClientPoint?: { clientX: number; clientY: number }) => {
+      applyZoomWithAnchor(
+        (prev) => (prev >= ZOOM_DOUBLE_CLICK ? ZOOM_DEFAULT : ZOOM_DOUBLE_CLICK),
+        anchorClientPoint,
+      )
+    },
+    [applyZoomWithAnchor],
+  )
+
   // Ctrl/Cmd + Scroll to zoom (capture on modal card to avoid being blocked by inner scroll targets)
   useEffect(() => {
     const container = viewerCardRef.current
+    const pane = rightPaneRef.current
     if (!open || !container) return
 
     const handleWheel = (event: WheelEvent) => {
       const shouldZoom = event.ctrlKey || event.metaKey
       if (!shouldZoom) return
       if (!container.contains(event.target as Node | null)) return
+      if (!pane || !pane.contains(event.target as Node | null)) return
 
       event.preventDefault()
-      if (interactionLocked) return
-      const delta = event.deltaY > 0 ? -50 : 50
-      setZoom((prev) => Math.min(1400, Math.max(200, prev + delta)))
+      const delta = event.deltaY > 0 ? -ZOOM_STEP : ZOOM_STEP
+      updateZoomWithAnchor(delta, { clientX: event.clientX, clientY: event.clientY })
     }
 
     document.addEventListener('wheel', handleWheel, { passive: false, capture: true })
     return () => document.removeEventListener('wheel', handleWheel, { capture: true })
-  }, [open, interactionLocked])
+  }, [open, interactionLocked, updateZoomWithAnchor])
 
   const selectAll = () => {
     if (interactionLocked) return
@@ -784,9 +844,10 @@ export function PdfViewer({ open, file, currentDir, onClose, onExtracted, onRena
               </div>
             )}
 
-            <button className="ghost" onClick={() => setZoom((z) => Math.max(200, z - 50))} disabled={interactionLocked}>-</button>
+            <button className="ghost" onClick={() => updateZoomWithAnchor(-ZOOM_STEP)} disabled={interactionLocked}>-</button>
             <span className="meta-pill">{Math.round(zoom / 6)}%</span>
-            <button className="ghost" onClick={() => setZoom((z) => Math.min(1400, z + 50))} disabled={interactionLocked}>+</button>
+            <button className="ghost" onClick={() => updateZoomWithAnchor(ZOOM_STEP)} disabled={interactionLocked}>+</button>
+            <span className="meta-pill">Ctrl/Cmd+휠 · 더블클릭 줌</span>
 
             <button className="primary" onClick={handleExtractClick} disabled={!canExtract}>
               {extracting ? '추출 중...' : '선택 추출'}
@@ -817,6 +878,9 @@ export function PdfViewer({ open, file, currentDir, onClose, onExtracted, onRena
                     onClick={(event) => {
                       togglePage(pageNumber, { shift: event.shiftKey, ctrl: event.ctrlKey || event.metaKey })
                       scrollToPage(pageNumber)
+                    }}
+                    onDoubleClick={(event) => {
+                      toggleZoomWithAnchor({ clientX: event.clientX, clientY: event.clientY })
                     }}
                     onKeyDown={(e) => {
                       if (e.key === 'Enter' || e.key === ' ') {
