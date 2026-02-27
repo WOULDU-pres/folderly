@@ -66,6 +66,7 @@ const ENTRY_PAGE_SIZE = 300
 const SHARED_CLIPBOARD_EVENT = 'app://shared-clipboard-updated'
 const SHARED_CLIPBOARD_LOCAL_KEY = 'explorer.sharedClipboard.v1'
 const NATIVE_DRAG_PREVIEW_ICON = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADElEQVR42mP4z8DwHwAFAAH/tkY6rQAAAABJRU5ErkJggg=='
+const DROP_EVENT_DEDUPE_WINDOW_MS = 300
 type SortField = 'name' | 'modifiedAt' | 'size'
 type SortDirection = 'asc' | 'desc'
 const SOURCE_FOLDER_BADGE_COLORS = ['#2563eb', '#16a34a', '#ca8a04', '#db2777', '#7c3aed', '#0891b2', '#f97316', '#0d9488', '#0284c7', '#6366f1']
@@ -310,6 +311,22 @@ function updateDropEffect(event: ReactDragEvent) {
   event.dataTransfer.dropEffect = event.ctrlKey || event.metaKey ? 'copy' : 'move'
 }
 
+function resolveDropCopyMode(event: ReactDragEvent): boolean {
+  const dropEffect = event.dataTransfer.dropEffect
+  if (dropEffect === 'copy') {
+    return true
+  }
+  if (dropEffect === 'move') {
+    return false
+  }
+
+  if (extractDroppedFilePaths(event).length > 0) {
+    return true
+  }
+
+  return event.ctrlKey || event.metaKey
+}
+
 function SortableFolderRow({
   folder,
   selected,
@@ -371,7 +388,7 @@ function SortableFolderRow({
         event.stopPropagation()
         const paths = readDragPayload(event)
         if (!paths.length) return
-        onDropEntries(paths, folder.path, event.ctrlKey || event.metaKey)
+        onDropEntries(paths, folder.path, resolveDropCopyMode(event))
       }}
     >
       <button
@@ -505,11 +522,8 @@ function SortableEntryRow({
         }
         const payloadPaths = selected && dragPaths.length > 0 ? dragPaths : [entry.path]
         const copyMode = event.ctrlKey || event.metaKey
-        if (onStartNativeDrag?.(payloadPaths, copyMode)) {
-          event.preventDefault()
-          return
-        }
         writeDragPayload(event, payloadPaths)
+        onStartNativeDrag?.(payloadPaths, copyMode)
       }}
       data-drop-path={entry.kind === 'folder' ? entry.path : undefined}
       onDragOver={(event) => {
@@ -533,7 +547,7 @@ function SortableEntryRow({
         event.stopPropagation()
         const paths = readDragPayload(event)
         if (!paths.length) return
-        onDropEntries(paths, entry.path, event.ctrlKey || event.metaKey)
+        onDropEntries(paths, entry.path, resolveDropCopyMode(event))
       }}
       onClick={(e) => onSelect(entry, { ctrl: e.ctrlKey || e.metaKey, shift: e.shiftKey })}
       onDoubleClick={() => {
@@ -723,11 +737,8 @@ function SortableGalleryCard({
         }
         const payloadPaths = selected && dragPaths.length > 0 ? dragPaths : [entry.path]
         const copyMode = event.ctrlKey || event.metaKey
-        if (onStartNativeDrag?.(payloadPaths, copyMode)) {
-          event.preventDefault()
-          return
-        }
         writeDragPayload(event, payloadPaths)
+        onStartNativeDrag?.(payloadPaths, copyMode)
       }}
       data-drop-path={entry.kind === 'folder' ? entry.path : undefined}
       onDragOver={(event) => {
@@ -751,7 +762,7 @@ function SortableGalleryCard({
         event.stopPropagation()
         const paths = readDragPayload(event)
         if (!paths.length) return
-        onDropEntries(paths, entry.path, event.ctrlKey || event.metaKey)
+        onDropEntries(paths, entry.path, resolveDropCopyMode(event))
       }}
       onClick={(e) => onSelect(entry, { ctrl: e.ctrlKey || e.metaKey, shift: e.shiftKey })}
       onDoubleClick={() => {
@@ -1045,6 +1056,8 @@ export default function App() {
   const operationToastTimerRef = useRef<number | null>(null)
   const undoToastTimerRef = useRef<number | null>(null)
   const nativeDragContextRef = useRef<NativeDragContext | null>(null)
+  const operationInProgressRef = useRef(false)
+  const lastDropSignatureRef = useRef<{ signature: string; timestamp: number } | null>(null)
 
   const {
     currentPath, setCurrentPath,
@@ -1254,6 +1267,17 @@ export default function App() {
   }, [visibleEntries, sourceFolderHints, showSourceColumn])
 
   const selectedPaths = useMemo(() => selectedEntries.map((e) => e.path), [selectedEntries])
+  const selectedSidebarFolderPaths = useMemo(
+    () =>
+      selectedSidebarFolderIds
+        .map((id) => allKnownFolderById.get(id)?.path)
+        .filter((path): path is string => Boolean(path)),
+    [selectedSidebarFolderIds, allKnownFolderById],
+  )
+  const operationSelectedPaths = useMemo(
+    () => (selectedPaths.length > 0 ? selectedPaths : selectedSidebarFolderPaths),
+    [selectedPaths, selectedSidebarFolderPaths],
+  )
   const canCreateFolder = Boolean(previewPath || currentPath)
   const activeSortField = useMemo(() => resolveSortField(sortMode), [sortMode])
   const activeSortDirection = useMemo(() => resolveSortDirection(sortMode), [sortMode])
@@ -1284,6 +1308,10 @@ export default function App() {
   useEffect(() => {
     expandedEntryFolderIdsRef.current = expandedEntryFolderIds
   }, [expandedEntryFolderIds])
+
+  useEffect(() => {
+    operationInProgressRef.current = operationInProgress
+  }, [operationInProgress])
 
   const resolveErrorMessage = (errorValue: unknown, fallback: string) => {
     if (errorValue instanceof Error && errorValue.message) return errorValue.message
@@ -1627,13 +1655,38 @@ export default function App() {
     }
   }
 
+  function shouldSkipDuplicateDrop(paths: string[], destinationPath: string, mode: PathOperationMode): boolean {
+    const normalizedPaths = normalizeDragPaths(paths)
+    if (!normalizedPaths.length || !destinationPath) return true
+
+    const signature = `${mode}|${destinationPath}|${[...normalizedPaths].sort().join('|')}`
+    const timestamp = Date.now()
+    const previous = lastDropSignatureRef.current
+
+    if (
+      previous
+      && previous.signature === signature
+      && timestamp - previous.timestamp <= DROP_EVENT_DEDUPE_WINDOW_MS
+    ) {
+      return true
+    }
+
+    lastDropSignatureRef.current = { signature, timestamp }
+    return false
+  }
+
+  function handleDroppedPaths(paths: string[], destinationPath: string, mode: PathOperationMode) {
+    if (shouldSkipDuplicateDrop(paths, destinationPath, mode)) return
+    void applyPathOperation(paths, destinationPath, mode)
+  }
+
   async function applyPathOperation(
     paths: string[],
     destinationPath: string,
     mode: 'copy' | 'move',
     options?: { recordUndo?: boolean },
   ): Promise<boolean> {
-    if (operationInProgress) return false
+    if (operationInProgressRef.current) return false
     const recordUndo = options?.recordUndo ?? true
     const normalized = paths.filter((path) => path && path !== destinationPath)
     if (!normalized.length) return false
@@ -1643,6 +1696,7 @@ export default function App() {
       operationToastTimerRef.current = null
     }
 
+    operationInProgressRef.current = true
     setOperationInProgress(true)
     setOperationStatus(mode === 'copy' ? '복사 중...' : '이동 중...')
     setError(null)
@@ -1673,6 +1727,7 @@ export default function App() {
       }
 
       await refreshExplorer()
+      operationInProgressRef.current = false
       setOperationInProgress(false)
       setOperationStatus(mode === 'copy' ? '복사 완료' : '이동 완료')
       operationToastTimerRef.current = window.setTimeout(() => {
@@ -1681,6 +1736,7 @@ export default function App() {
       }, 3000)
       return true
     } catch (e) {
+      operationInProgressRef.current = false
       setOperationInProgress(false)
       setOperationStatus(null)
       setError(resolveErrorMessage(e, `${mode === 'copy' ? '복사' : '이동'} 작업에 실패했습니다.`))
@@ -2137,6 +2193,7 @@ export default function App() {
   }, [])
 
   useEffect(() => {
+    let disposed = false
     let unlisten: UnlistenFn | undefined
 
     listen<{ clipboard?: ClipboardState | null }>(SHARED_CLIPBOARD_EVENT, (event) => {
@@ -2145,6 +2202,10 @@ export default function App() {
       writeLocalClipboardState(nextClipboard)
     })
       .then((cleanup) => {
+        if (disposed) {
+          cleanup()
+          return
+        }
         unlisten = cleanup
       })
       .catch(() => {
@@ -2152,6 +2213,7 @@ export default function App() {
       })
 
     return () => {
+      disposed = true
       if (unlisten) {
         unlisten()
       }
@@ -2241,14 +2303,14 @@ export default function App() {
         setSelectedEntryIds(visibleEntries.map((e) => e.id))
         return
       }
-      if (ctrlOrMeta && event.key.toLowerCase() === 'c' && selectedPaths.length > 0 && !operationInProgress) {
+      if (ctrlOrMeta && event.key.toLowerCase() === 'c' && operationSelectedPaths.length > 0 && !operationInProgress) {
         event.preventDefault()
-        syncClipboard({ mode: 'copy', paths: [...selectedPaths] })
+        syncClipboard({ mode: 'copy', paths: [...operationSelectedPaths] })
         return
       }
-      if (ctrlOrMeta && event.key.toLowerCase() === 'x' && selectedPaths.length > 0 && !operationInProgress) {
+      if (ctrlOrMeta && event.key.toLowerCase() === 'x' && operationSelectedPaths.length > 0 && !operationInProgress) {
         event.preventDefault()
-        syncClipboard({ mode: 'cut', paths: [...selectedPaths] })
+        syncClipboard({ mode: 'cut', paths: [...operationSelectedPaths] })
         return
       }
       if (ctrlOrMeta && event.key.toLowerCase() === 'v') {
@@ -2325,7 +2387,7 @@ export default function App() {
 
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [selectedEntries, selectedPaths, selectedEntryIds, lastSelectedEntry, visibleEntries, baseDisplayEntries, entryIndexById, previewPath, clipboard, operationInProgress, orderMode])
+  }, [selectedEntries, selectedEntryIds, lastSelectedEntry, visibleEntries, baseDisplayEntries, entryIndexById, previewPath, clipboard, operationInProgress, orderMode, operationSelectedPaths])
 
   useEffect(() => {
     if (!error) return
@@ -2345,6 +2407,7 @@ export default function App() {
   }, [])
 
   useEffect(() => {
+    let disposed = false
     let unlisten: (() => void) | undefined
 
     getCurrentWindow()
@@ -2366,9 +2429,13 @@ export default function App() {
             ? nativeDragContext.mode
             : 'copy'
 
-        void applyPathOperation(droppedPaths, target, mode)
+        handleDroppedPaths(droppedPaths, target, mode)
       })
       .then((cleanup) => {
+        if (disposed) {
+          cleanup()
+          return
+        }
         unlisten = cleanup
       })
       .catch(() => {
@@ -2376,11 +2443,12 @@ export default function App() {
       })
 
     return () => {
+      disposed = true
       if (unlisten) {
         unlisten()
       }
     }
-  }, [previewPath, currentPath, operationInProgress])
+  }, [previewPath, currentPath])
 
   const handleSidebarFolderClick = (folder: FolderItem, modifiers: SidebarSelectModifiers) => {
     if (clickTimerRef.current) {
@@ -2630,15 +2698,15 @@ export default function App() {
         label: '복사',
         icon: <Copy size={14} />,
         shortcut: 'Ctrl+C',
-        disabled: selectedEntries.length === 0,
-        onClick: () => syncClipboard({ mode: 'copy', paths: [...selectedPaths] }),
+        disabled: operationSelectedPaths.length === 0,
+        onClick: () => syncClipboard({ mode: 'copy', paths: [...operationSelectedPaths] }),
       },
       {
         label: '잘라내기',
         icon: <Scissors size={14} />,
         shortcut: 'Ctrl+X',
-        disabled: selectedEntries.length === 0,
-        onClick: () => syncClipboard({ mode: 'cut', paths: [...selectedPaths] }),
+        disabled: operationSelectedPaths.length === 0,
+        onClick: () => syncClipboard({ mode: 'cut', paths: [...operationSelectedPaths] }),
       },
       {
         label: '붙여넣기',
@@ -2663,7 +2731,7 @@ export default function App() {
         onClick: () => void deleteSelected(),
       },
     ]
-  }, [contextMenu, selectedEntries, selectedEntryIds, selectedPaths, clipboard, canCreateFolder, actionInProgress])
+  }, [contextMenu, selectedEntries, selectedEntryIds, operationSelectedPaths, clipboard, canCreateFolder, actionInProgress])
 
   const handleAddBookmark = () => {
     const targetPath = previewPath || currentPath
@@ -2862,7 +2930,8 @@ export default function App() {
                     event.preventDefault()
                     const paths = readDragPayload(event)
                     if (!paths.length) return
-                    void applyPathOperation(paths, drive.path, event.ctrlKey || event.metaKey ? 'copy' : 'move')
+                    const mode: PathOperationMode = resolveDropCopyMode(event) ? 'copy' : 'move'
+                    handleDroppedPaths(paths, drive.path, mode)
                   }}
                 >
                   <HardDrive size={15} /> {drive.label}
@@ -2909,7 +2978,7 @@ export default function App() {
                           onClick={handleSidebarFolderClick}
                           onDoubleClick={handleSidebarFolderDoubleClick}
                           onDropEntries={(paths, destinationPath, copyMode) =>
-                            void applyPathOperation(paths, destinationPath, copyMode ? 'copy' : 'move')
+                            handleDroppedPaths(paths, destinationPath, copyMode ? 'copy' : 'move')
                           }
                         />
                       ))}
@@ -2950,7 +3019,8 @@ export default function App() {
             if (!destinationPath) return
             const paths = readDragPayload(event)
             if (!paths.length) return
-            void applyPathOperation(paths, destinationPath, event.ctrlKey || event.metaKey ? 'copy' : 'move')
+            const mode: PathOperationMode = resolveDropCopyMode(event) ? 'copy' : 'move'
+            handleDroppedPaths(paths, destinationPath, mode)
           }}
         >
           <div className="pane-head">
@@ -3057,7 +3127,7 @@ export default function App() {
                           sourceFolderHint={sourceFolderByEntryId.get(entry.id) ?? null}
                           onOpen={(item) => void openEntry(item)}
                           onDropEntries={(paths, destinationPath, copyMode) =>
-                            void applyPathOperation(paths, destinationPath, copyMode ? 'copy' : 'move')
+                            handleDroppedPaths(paths, destinationPath, copyMode ? 'copy' : 'move')
                           }
                           onStartNativeDrag={tryStartNativeFileDrag}
                           canExpand={folderToggleState.canExpand}
@@ -3131,7 +3201,7 @@ export default function App() {
                         sourceFolderHint={sourceFolderByEntryId.get(entry.id) ?? null}
                         onOpen={(item) => void openEntry(item)}
                         onDropEntries={(paths, destinationPath, copyMode) =>
-                          void applyPathOperation(paths, destinationPath, copyMode ? 'copy' : 'move')
+                          handleDroppedPaths(paths, destinationPath, copyMode ? 'copy' : 'move')
                         }
                         onStartNativeDrag={tryStartNativeFileDrag}
                         onStartInlineRename={beginInlineRename}
