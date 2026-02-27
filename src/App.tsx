@@ -1101,6 +1101,7 @@ export default function App() {
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null)
   const [selectedSidebarFolderIds, setSelectedSidebarFolderIds] = useState<string[]>([])
   const [expandedEntryFolderIds, setExpandedEntryFolderIds] = useState<Set<string>>(new Set())
+  const expandedEntryFolderIdsRef = useRef<Set<string>>(new Set())
   const [entryChildrenByFolderId, setEntryChildrenByFolderId] = useState<Map<string, ExplorerEntry[]>>(new Map())
   const [entryChildrenLoadingIds, setEntryChildrenLoadingIds] = useState<Set<string>>(new Set())
   const [visibleFolderCount, setVisibleFolderCount] = useState(FOLDER_PAGE_SIZE)
@@ -1279,6 +1280,10 @@ export default function App() {
     () => new Set(clipboard?.mode === 'cut' ? clipboard.paths : []),
     [clipboard],
   )
+
+  useEffect(() => {
+    expandedEntryFolderIdsRef.current = expandedEntryFolderIds
+  }, [expandedEntryFolderIds])
 
   const resolveErrorMessage = (errorValue: unknown, fallback: string) => {
     if (errorValue instanceof Error && errorValue.message) return errorValue.message
@@ -1461,15 +1466,29 @@ export default function App() {
     }
   }
 
-  async function loadPreviewEntries(pathOrPaths: string | string[]) {
+  async function loadPreviewEntries(
+    pathOrPaths: string | string[],
+    options?: { preserveExpandedState?: boolean },
+  ) {
+    const preserveExpandedState = options?.preserveExpandedState ?? false
     setPreviewLoading(true)
     setError(null)
-    setExpandedEntryFolderIds(new Set())
-    setEntryChildrenByFolderId(new Map())
-    setEntryChildrenLoadingIds(new Set())
+    if (!preserveExpandedState) {
+      setExpandedEntryFolderIds(new Set())
+      setEntryChildrenByFolderId(new Map())
+      setEntryChildrenLoadingIds(new Set())
+    }
     const targetPaths = Array.isArray(pathOrPaths)
       ? Array.from(new Set(pathOrPaths.filter((path) => path.length > 0)))
       : [pathOrPaths]
+    const expandedFolderIdsSnapshot = preserveExpandedState ? Array.from(expandedEntryFolderIdsRef.current) : []
+    if (expandedFolderIdsSnapshot.length > 0) {
+      setEntryChildrenLoadingIds((prev) => {
+        const next = new Set(prev)
+        expandedFolderIdsSnapshot.forEach((id) => next.add(id))
+        return next
+      })
+    }
 
     try {
       const results = await Promise.all(
@@ -1487,6 +1506,68 @@ export default function App() {
 
       const idSet = new Set([...folderResult.map((entry) => entry.id), ...fileResult.map((entry) => entry.id)])
       setSelectedEntryIds((prev) => prev.filter((id) => idSet.has(id)))
+
+      if (expandedFolderIdsSnapshot.length > 0) {
+        const rootFoldersById = new Map(folderResult.map((folder) => [folder.id, folder] as const))
+        const refreshedChildren = await Promise.all(
+          expandedFolderIdsSnapshot.map(async (folderId) => {
+            const knownFolder = rootFoldersById.get(folderId) ?? (() => {
+              const knownEntry = entryById.get(folderId)
+              return knownEntry?.kind === 'folder' ? knownEntry : null
+            })()
+
+            if (!knownFolder) {
+              return { folderId, entries: null as ExplorerEntry[] | null }
+            }
+
+            try {
+              const [childFolders, childFiles] = await Promise.all([
+                invoke<FolderItem[]>('list_folders', { parentPath: knownFolder.path }),
+                invoke<FileItem[]>('list_files', { parentPath: knownFolder.path }),
+              ])
+
+              return {
+                folderId,
+                entries: dedupeById([
+                  ...childFolders.map((entry) => ({ ...entry, kind: 'folder' as const })),
+                  ...childFiles.map((entry) => ({ ...entry, kind: 'file' as const })),
+                ]),
+              }
+            } catch {
+              return {
+                folderId,
+                entries: [] as ExplorerEntry[],
+              }
+            }
+          }),
+        )
+
+        const removedExpandedIds = new Set(
+          refreshedChildren
+            .filter((result) => result.entries === null)
+            .map((result) => result.folderId),
+        )
+
+        setEntryChildrenByFolderId((prev) => {
+          const next = new Map(prev)
+          refreshedChildren.forEach(({ folderId, entries }) => {
+            if (entries === null) {
+              next.delete(folderId)
+              return
+            }
+            next.set(folderId, entries)
+          })
+          return next
+        })
+
+        if (removedExpandedIds.size > 0) {
+          setExpandedEntryFolderIds((prev) => {
+            const next = new Set(prev)
+            removedExpandedIds.forEach((id) => next.delete(id))
+            return next
+          })
+        }
+      }
     } catch (e) {
       const fallback =
         targetPaths.length > 1
@@ -1497,6 +1578,13 @@ export default function App() {
       setPreviewFiles([])
       setSelectedEntryIds([])
     } finally {
+      if (expandedFolderIdsSnapshot.length > 0) {
+        setEntryChildrenLoadingIds((prev) => {
+          const next = new Set(prev)
+          expandedFolderIdsSnapshot.forEach((id) => next.delete(id))
+          return next
+        })
+      }
       setPreviewLoading(false)
     }
   }
@@ -1528,14 +1616,14 @@ export default function App() {
         new Set(selectedSidebarFolderIds.map((id) => allKnownFolderById.get(id)?.path).filter((path): path is string => Boolean(path))),
       )
       if (selectedFolderPaths.length > 1) {
-        await loadPreviewEntries(selectedFolderPaths)
+        await loadPreviewEntries(selectedFolderPaths, { preserveExpandedState: true })
         return
       }
     }
 
     const targetPreview = previewPath || currentPath
     if (targetPreview) {
-      await loadPreviewEntries(targetPreview)
+      await loadPreviewEntries(targetPreview, { preserveExpandedState: true })
     }
   }
 
@@ -3117,14 +3205,14 @@ export default function App() {
           }
           const targetPreview = previewPath || currentPath
           if (targetPreview) {
-            void loadPreviewEntries(targetPreview)
+            void loadPreviewEntries(targetPreview, { preserveExpandedState: true })
           }
         }}
         onRenamed={(oldPath: string, newPath: string) => {
           setSelectedEntryIds((prev) => prev.map((id) => (id === oldPath ? newPath : id)))
           const targetPreview = previewPath || currentPath
           if (targetPreview) {
-            void loadPreviewEntries(targetPreview)
+            void loadPreviewEntries(targetPreview, { preserveExpandedState: true })
           }
         }}
       />
@@ -3137,7 +3225,7 @@ export default function App() {
         onMerged={() => {
           const targetPreview = previewPath || currentPath
           if (targetPreview) {
-            void loadPreviewEntries(targetPreview)
+            void loadPreviewEntries(targetPreview, { preserveExpandedState: true })
           }
         }}
       />

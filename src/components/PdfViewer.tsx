@@ -71,7 +71,6 @@ const ZOOM_MIN = 200
 const ZOOM_MAX = 1400
 const ZOOM_DEFAULT = 600
 const ZOOM_STEP = 25
-const ZOOM_DOUBLE_CLICK = 900
 const HIGHLIGHT_COLORS = ['#fde047', '#38bdf8', '#f97316', '#34d399', '#f43f5e', '#a78bfa'] as const
 
 function isClientPointInsideElement(
@@ -732,16 +731,6 @@ export function PdfViewer({ open, file, currentDir, onClose, onExtracted, onRena
     [applyZoomWithAnchor],
   )
 
-  const toggleZoomWithAnchor = useCallback(
-    (anchorClientPoint?: { clientX: number; clientY: number }) => {
-      applyZoomWithAnchor(
-        (prev) => (prev >= ZOOM_DOUBLE_CLICK ? ZOOM_DEFAULT : ZOOM_DOUBLE_CLICK),
-        anchorClientPoint,
-      )
-    },
-    [applyZoomWithAnchor],
-  )
-
   const cycleRotation = useCallback(() => {
     setRotation((prev) => (prev + 90) % 360)
   }, [])
@@ -768,7 +757,12 @@ export function PdfViewer({ open, file, currentDir, onClose, onExtracted, onRena
       if (!targetInsidePane && !pointerInsidePane) return
 
       event.preventDefault()
-      const delta = event.deltaY > 0 ? -ZOOM_STEP : ZOOM_STEP
+      event.stopPropagation()
+
+      const direction = Math.sign(event.deltaY)
+      if (direction === 0) return
+      const step = event.deltaMode === WheelEvent.DOM_DELTA_LINE ? ZOOM_STEP * 2 : ZOOM_STEP
+      const delta = direction > 0 ? -step : step
       updateZoomWithAnchor(delta, { clientX: event.clientX, clientY: event.clientY })
     }
 
@@ -1119,7 +1113,7 @@ export function PdfViewer({ open, file, currentDir, onClose, onExtracted, onRena
             <button className="ghost" onClick={() => updateZoomWithAnchor(-ZOOM_STEP)} disabled={interactionLocked}>-</button>
             <span className="meta-pill">{Math.round(zoom / 6)}%</span>
             <button className="ghost" onClick={() => updateZoomWithAnchor(ZOOM_STEP)} disabled={interactionLocked}>+</button>
-            <span className="meta-pill">Ctrl/Cmd+휠 · 더블클릭 줌</span>
+            <span className="meta-pill">Ctrl/Cmd+휠 줌</span>
             <span className="meta-pill">Ctrl/Cmd+Z 하이라이트 취소</span>
 
             <button className="primary" onClick={handleExtractClick} disabled={!canExtract}>
@@ -1158,9 +1152,6 @@ export function PdfViewer({ open, file, currentDir, onClose, onExtracted, onRena
                     onClick={(event) => {
                       togglePage(pageNumber, { shift: event.shiftKey, ctrl: event.ctrlKey || event.metaKey })
                       scrollToPage(pageNumber)
-                    }}
-                    onDoubleClick={(event) => {
-                      toggleZoomWithAnchor({ clientX: event.clientX, clientY: event.clientY })
                     }}
                     onKeyDown={(e) => {
                       if (e.key === 'Enter' || e.key === ' ') {
@@ -1203,9 +1194,6 @@ export function PdfViewer({ open, file, currentDir, onClose, onExtracted, onRena
                       handleLineClick(event, pageNumber)
                       togglePage(pageNumber, { shift: event.shiftKey, ctrl: event.ctrlKey || event.metaKey })
                       scrollToPage(pageNumber)
-                    }}
-                    onDoubleClick={(event) => {
-                      toggleZoomWithAnchor({ clientX: event.clientX, clientY: event.clientY })
                     }}
                     onKeyDown={(e) => {
                       if (e.key === 'Enter' || e.key === ' ') {
