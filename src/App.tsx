@@ -131,6 +131,34 @@ function resolveDropPathFromWindowPosition(position: { x: number; y: number }): 
   return value || null
 }
 
+function resolveDropElementFromWindowPosition(position: { x: number; y: number }): HTMLElement | null {
+  if (typeof window === 'undefined' || typeof document === 'undefined') return null
+  const scale = window.devicePixelRatio || 1
+  const logicalX = position.x / scale
+  const logicalY = position.y / scale
+  const target = document.elementFromPoint(logicalX, logicalY)
+  if (!target) return null
+  return target.closest<HTMLElement>('[data-drop-path]')
+}
+
+function updateNativeDragHighlight(position: { x: number; y: number }, ref: { current: HTMLElement | null }): void {
+  const dropEl = resolveDropElementFromWindowPosition(position)
+  if (ref.current && ref.current !== dropEl) {
+    ref.current.classList.remove('drop-target')
+  }
+  if (dropEl) {
+    dropEl.classList.add('drop-target')
+  }
+  ref.current = dropEl
+}
+
+function clearNativeDragHighlight(ref: { current: HTMLElement | null }): void {
+  if (ref.current) {
+    ref.current.classList.remove('drop-target')
+    ref.current = null
+  }
+}
+
 type SortableFolderRowProps = {
   folder: FolderItem
   selected: boolean
@@ -522,8 +550,11 @@ function SortableEntryRow({
         }
         const payloadPaths = selected && dragPaths.length > 0 ? dragPaths : [entry.path]
         const copyMode = event.ctrlKey || event.metaKey
+        if (onStartNativeDrag?.(payloadPaths, copyMode)) {
+          event.preventDefault()
+          return
+        }
         writeDragPayload(event, payloadPaths)
-        onStartNativeDrag?.(payloadPaths, copyMode)
       }}
       data-drop-path={entry.kind === 'folder' ? entry.path : undefined}
       onDragOver={(event) => {
@@ -737,8 +768,11 @@ function SortableGalleryCard({
         }
         const payloadPaths = selected && dragPaths.length > 0 ? dragPaths : [entry.path]
         const copyMode = event.ctrlKey || event.metaKey
+        if (onStartNativeDrag?.(payloadPaths, copyMode)) {
+          event.preventDefault()
+          return
+        }
         writeDragPayload(event, payloadPaths)
-        onStartNativeDrag?.(payloadPaths, copyMode)
       }}
       data-drop-path={entry.kind === 'folder' ? entry.path : undefined}
       onDragOver={(event) => {
@@ -1056,6 +1090,7 @@ export default function App() {
   const operationToastTimerRef = useRef<number | null>(null)
   const undoToastTimerRef = useRef<number | null>(null)
   const nativeDragContextRef = useRef<NativeDragContext | null>(null)
+  const nativeDragHighlightRef = useRef<HTMLElement | null>(null)
   const operationInProgressRef = useRef(false)
   const lastDropSignatureRef = useRef<{ signature: string; timestamp: number } | null>(null)
 
@@ -2412,7 +2447,17 @@ export default function App() {
 
     getCurrentWindow()
       .onDragDropEvent((event) => {
+        if (event.payload.type === 'enter' || event.payload.type === 'over') {
+          updateNativeDragHighlight(event.payload.position, nativeDragHighlightRef)
+          return
+        }
+        if (event.payload.type === 'leave') {
+          clearNativeDragHighlight(nativeDragHighlightRef)
+          return
+        }
         if (event.payload.type !== 'drop') return
+        clearNativeDragHighlight(nativeDragHighlightRef)
+
         const droppedPaths = normalizeDragPaths(event.payload.paths)
         if (!droppedPaths.length) return
 
@@ -2444,6 +2489,7 @@ export default function App() {
 
     return () => {
       disposed = true
+      clearNativeDragHighlight(nativeDragHighlightRef)
       if (unlisten) {
         unlisten()
       }
