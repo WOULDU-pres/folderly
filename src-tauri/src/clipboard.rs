@@ -1,11 +1,9 @@
 use serde::{Deserialize, Serialize};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use tauri::{AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder};
 
 pub const SHARED_CLIPBOARD_EVENT: &str = "app://shared-clipboard-updated";
-const SECONDARY_WINDOW_LABEL: &str = "secondary";
-static SECONDARY_WINDOW_OPENING: AtomicBool = AtomicBool::new(false);
+const SECONDARY_WINDOW_LABEL_PREFIX: &str = "secondary-window-";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -60,47 +58,52 @@ pub fn clear_shared_clipboard(
 
 #[tauri::command]
 pub async fn open_second_window(app: AppHandle) -> Result<String, String> {
-    if let Some(window) = app.get_webview_window(SECONDARY_WINDOW_LABEL) {
-        let _ = window.show();
-        let _ = window.unminimize();
-        let _ = window.set_focus();
-        return Ok(SECONDARY_WINDOW_LABEL.to_string());
-    }
+    let next_window_index = next_secondary_window_index(app.webview_windows().keys().map(String::as_str));
+    let window_label = secondary_window_label(next_window_index);
+    let window_title = format!(
+        "Windows PDF Directory Explorer (Window {})",
+        next_window_index + 1
+    );
 
-    if !SECONDARY_WINDOW_OPENING
-        .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
-        .is_ok()
-    {
-        return Ok(SECONDARY_WINDOW_LABEL.to_string());
-    }
-
-    let build = WebviewWindowBuilder::new(&app, SECONDARY_WINDOW_LABEL, WebviewUrl::default())
-        .title("Windows PDF Directory Explorer (Window 2)")
+    let build = WebviewWindowBuilder::new(&app, window_label.clone(), WebviewUrl::default())
+        .title(window_title)
         .inner_size(1480.0, 860.0)
         .min_inner_size(1160.0, 640.0)
         .resizable(true)
         .build();
-
-    SECONDARY_WINDOW_OPENING.store(false, Ordering::Release);
 
     match build {
         Ok(window) => {
             let _ = window.show();
             let _ = window.unminimize();
             let _ = window.set_focus();
-            Ok(SECONDARY_WINDOW_LABEL.to_string())
+            Ok(window_label)
         }
-        Err(err) => {
-            if let Some(window) = app.get_webview_window(SECONDARY_WINDOW_LABEL) {
-                let _ = window.show();
-                let _ = window.unminimize();
-                let _ = window.set_focus();
-                Ok(SECONDARY_WINDOW_LABEL.to_string())
-            } else {
-                Err(format!("failed opening second window: {err}"))
+        Err(err) => Err(format!("failed opening new window: {err}")),
+    }
+}
+
+fn secondary_window_label(index: usize) -> String {
+    format!("{SECONDARY_WINDOW_LABEL_PREFIX}{index}")
+}
+
+fn next_secondary_window_index<'a>(labels: impl IntoIterator<Item = &'a str>) -> usize {
+    let mut next_index = 1usize;
+
+    for label in labels {
+        if label == "secondary" {
+            next_index = next_index.max(2);
+            continue;
+        }
+
+        if let Some(raw_index) = label.strip_prefix(SECONDARY_WINDOW_LABEL_PREFIX) {
+            if let Ok(index) = raw_index.parse::<usize>() {
+                next_index = next_index.max(index.saturating_add(1));
             }
         }
     }
+
+    next_index
 }
 
 fn set_shared_clipboard_internal(
@@ -153,4 +156,32 @@ fn normalize_shared_clipboard(
 
     value.paths = deduped;
     Ok(Some(value))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{next_secondary_window_index, secondary_window_label};
+
+    #[test]
+    fn next_secondary_window_index_starts_at_one() {
+        let labels = ["main"];
+        assert_eq!(next_secondary_window_index(labels), 1);
+    }
+
+    #[test]
+    fn next_secondary_window_index_advances_without_limit() {
+        let labels = [
+            "main",
+            "secondary",
+            "secondary-window-1",
+            "secondary-window-2",
+            "secondary-window-7",
+        ];
+        assert_eq!(next_secondary_window_index(labels), 8);
+    }
+
+    #[test]
+    fn secondary_window_label_uses_numeric_suffix() {
+        assert_eq!(secondary_window_label(12), "secondary-window-12");
+    }
 }

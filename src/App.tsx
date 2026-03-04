@@ -57,10 +57,10 @@ import { mergeManualOrder, sortFiles, sortFolders } from './utils/folderOrder'
 import { extLabel, formatBytes, formatDate } from './utils/format'
 import { encodeFileSrcUrl, getFileDirectory, withPreservedExtension } from './utils/path'
 import { resolvePasteTarget } from './utils/pasteTarget'
+import { ENTRY_DRAG_MIME, encodeDragPayload, normalizeDragPaths, parseDragPayload } from './utils/dragPayload'
 import { useExplorerStore, type ClipboardState, type ExplorerEntry, type UndoEntry } from './store/useExplorerStore'
 
 const BOOKMARK_STORAGE_KEY = 'explorer.bookmarks.v1'
-const ENTRY_DRAG_MIME = 'application/x-windows-explorer-paths'
 const FOLDER_PAGE_SIZE = 300
 const ENTRY_PAGE_SIZE = 300
 const SHARED_CLIPBOARD_EVENT = 'app://shared-clipboard-updated'
@@ -171,48 +171,12 @@ type SortableFolderRowProps = {
 }
 
 function writeDragPayload(event: ReactDragEvent, paths: string[]) {
-  const normalizedPaths = normalizeDragPaths(paths)
-  const payload = JSON.stringify(normalizedPaths)
-  const plainPayload = normalizedPaths.join('\n')
+  const { mimePayload, plainPayload, uriListPayload } = encodeDragPayload(paths)
 
-  event.dataTransfer.setData(ENTRY_DRAG_MIME, payload)
+  event.dataTransfer.setData(ENTRY_DRAG_MIME, mimePayload)
   event.dataTransfer.setData('text/plain', plainPayload)
-  event.dataTransfer.setData('text/uri-list', normalizedPaths.map(toFileUriPath).join('\n'))
+  event.dataTransfer.setData('text/uri-list', uriListPayload)
   event.dataTransfer.effectAllowed = 'copyMove'
-}
-
-function normalizeDragPaths(paths: string[]): string[] {
-  const deduped = new Set<string>()
-  for (const value of paths) {
-    const trimmed = value.trim()
-    if (!trimmed) continue
-    deduped.add(trimmed)
-  }
-  return Array.from(deduped)
-}
-
-function decodeFileUriPath(value: string): string {
-  if (!value.toLowerCase().startsWith('file://')) {
-    return value
-  }
-
-  try {
-    const uri = new URL(value)
-    const decodedPath = decodeURIComponent(uri.pathname)
-    const normalizedLeadingSlash = decodedPath.replace(/^\/([A-Za-z]:[\\/])/, '$1')
-    return normalizedLeadingSlash.replace(/\//g, '\\')
-  } catch {
-    return value
-  }
-}
-
-function toFileUriPath(path: string): string {
-  const normalized = path.replace(/\\/g, '/')
-  if (/^[A-Za-z]:\//.test(normalized)) {
-    return `file:///${encodeURI(normalized)}`
-  }
-
-  return `file:///${encodeURI(normalized.replace(/^\/+/, ''))}`
 }
 
 function extractDroppedFilePaths(event: ReactDragEvent): string[] {
@@ -228,31 +192,6 @@ function extractDroppedFilePaths(event: ReactDragEvent): string[] {
   }
 
   return normalizeDragPaths(paths)
-}
-
-function parseDragPayload(payload: string): string[] {
-  const trimmedPayload = payload.trim()
-  if (!trimmedPayload) return []
-
-  try {
-    const parsed = JSON.parse(trimmedPayload)
-    if (Array.isArray(parsed)) {
-      return normalizeDragPaths(parsed.filter((value): value is string => typeof value === 'string'))
-    }
-    if (typeof parsed === 'string') {
-      return normalizeDragPaths([parsed])
-    }
-  } catch {
-    // fallback below
-  }
-
-  const lines = trimmedPayload
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter((line) => line.length > 0 && !line.startsWith('#'))
-    .map(decodeFileUriPath)
-
-  return normalizeDragPaths(lines)
 }
 
 function readDragPayload(event: ReactDragEvent): string[] {
@@ -1334,6 +1273,7 @@ export default function App() {
         .map(({ kind: _kind, ...file }) => file),
     [orderedEntries],
   )
+  const canMergePdf = previewPdfFiles.length >= 2
 
   const cutPathSet = useMemo(
     () => new Set(clipboard?.mode === 'cut' ? clipboard.paths : []),
@@ -1823,13 +1763,15 @@ export default function App() {
     const normalizedPaths = normalizeDragPaths(paths)
     if (!normalizedPaths.length) return false
 
-    const mode: PathOperationMode = copyMode ? 'copy' : 'move'
-    nativeDragContextRef.current = { paths: normalizedPaths, mode }
+    const requestedMode: PathOperationMode = copyMode ? 'copy' : 'move'
+    nativeDragContextRef.current = { paths: normalizedPaths, mode: requestedMode }
 
     void startNativeDrag({
       item: normalizedPaths,
       icon: NATIVE_DRAG_PREVIEW_ICON,
-      mode,
+      // Browser drop targets typically only accept copy operations from external apps.
+      // Keep requestedMode in nativeDragContextRef for in-app drop handling.
+      mode: 'copy',
     })
       .catch(() => {
         // no-op
@@ -1852,7 +1794,7 @@ export default function App() {
     try {
       await invoke('open_second_window')
     } catch (error) {
-      setError(resolveErrorMessage(error, '두 번째 창을 열지 못했습니다.'))
+      setError(resolveErrorMessage(error, '새 창을 열지 못했습니다.'))
     } finally {
       setIsOpeningSecondaryWindow(false)
     }
@@ -3090,27 +3032,6 @@ export default function App() {
             <p className="pane-hint">
               드래그 기본 동작: 이동 (Ctrl/Cmd를 누르면 복사)
             </p>
-            <div className="pane-actions">
-              {pdfModalOpen && (
-                <>
-                  <button
-                    className="win-btn"
-                    style={{ borderColor: 'var(--border)' }}
-                    disabled={previewPdfFiles.length < 2}
-                    onClick={() => setMergePdfModalOpen(true)}
-                  >
-                    PDF 병합
-                  </button>
-                  <button
-                    className="win-btn primary"
-                    disabled={selectedFile?.ext.toLowerCase() !== 'pdf'}
-                    onClick={() => setPdfModalOpen(true)}
-                  >
-                    PDF 페이지 추출
-                  </button>
-                </>
-              )}
-            </div>
           </div>
 
           {previewLoading && <p className="state-text">항목 로딩 중...</p>}
@@ -3324,6 +3245,8 @@ export default function App() {
         open={pdfModalOpen}
         file={selectedFile}
         currentDir={previewPath || currentPath}
+        canMergePdf={canMergePdf}
+        onOpenMerge={() => setMergePdfModalOpen(true)}
         onClose={() => setPdfModalOpen(false)}
         onExtracted={() => {
           if (currentPath) {

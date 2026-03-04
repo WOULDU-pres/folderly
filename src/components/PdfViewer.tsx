@@ -15,6 +15,7 @@ import {
 import { FileNameModal } from './FileNameModal'
 import { ProgressBar } from './ProgressBar'
 import { PDF_EXTRACT_KEYWORD_SUGGESTIONS } from '../utils/keywordSuggestion'
+import { popLastHighlight, type HighlightUndoHistoryEntry } from '../utils/highlightUndo'
 
 import * as pdfjs from 'pdfjs-dist/legacy/build/pdf.mjs'
 
@@ -39,6 +40,8 @@ type PdfViewerProps = {
   open: boolean
   file: FileItem | null
   currentDir: string
+  canMergePdf: boolean
+  onOpenMerge: () => void
   onClose: () => void
   onExtracted: () => void
   onRenamed: (oldPath: string, newPath: string) => void
@@ -62,10 +65,7 @@ type HighlightLine = {
   end: NormalizedPoint
 }
 
-type HighlightHistoryEntry = {
-  id: string
-  page: number
-}
+type HighlightHistoryEntry = HighlightUndoHistoryEntry
 
 const ZOOM_MIN = 200
 const ZOOM_MAX = 1400
@@ -205,7 +205,17 @@ function appendWarningsMessage(baseMessage: string, warnings: string[]): string 
   return `${baseMessage} (참고: ${warnings.join(' / ')})`
 }
 
-export function PdfViewer({ open, file, currentDir, onClose, onExtracted, onRenamed, onBusyChange }: PdfViewerProps) {
+export function PdfViewer({
+  open,
+  file,
+  currentDir,
+  canMergePdf,
+  onOpenMerge,
+  onClose,
+  onExtracted,
+  onRenamed,
+  onBusyChange,
+}: PdfViewerProps) {
   const [loading, setLoading] = useState(false)
   const [extracting, setExtracting] = useState(false)
   const [renaming, setRenaming] = useState(false)
@@ -246,6 +256,16 @@ export function PdfViewer({ open, file, currentDir, onClose, onExtracted, onRena
   const lastSelectedPageRef = useRef<number | null>(null)
   const thumbsRef = useRef<Record<number, string>>({})
   const highlightHistoryRef = useRef<HighlightHistoryEntry[]>([])
+  const highlightIdSequenceRef = useRef(0)
+
+  const setHighlightHistoryState = useCallback((nextHistory: HighlightHistoryEntry[]) => {
+    highlightHistoryRef.current = nextHistory
+    setHighlightHistory(nextHistory)
+  }, [])
+
+  const clearHighlightHistory = useCallback(() => {
+    setHighlightHistoryState([])
+  }, [setHighlightHistoryState])
 
   useEffect(() => {
     thumbsRef.current = thumbs
@@ -311,11 +331,12 @@ export function PdfViewer({ open, file, currentDir, onClose, onExtracted, onRena
       setPendingScrollPage(null)
       setSelectedPages([])
       setHighlightLines({})
-      setHighlightHistory([])
+      clearHighlightHistory()
+      highlightIdSequenceRef.current = 0
       setPageDisplayRotations({})
       setRotation(0)
     }
-  }, [open, file])
+  }, [open, file, clearHighlightHistory])
 
   const isPdf = viewerFile?.ext.toLowerCase() === 'pdf'
 
@@ -406,7 +427,7 @@ export function PdfViewer({ open, file, currentDir, onClose, onExtracted, onRena
       if (!isSameSession) {
         setSelectedPages([])
         setHighlightLines({})
-        setHighlightHistory([])
+        clearHighlightHistory()
         setPageDisplayRotations({})
       }
       lastSelectedPageRef.current = null
@@ -605,23 +626,9 @@ export function PdfViewer({ open, file, currentDir, onClose, onExtracted, onRena
       const last = history[history.length - 1]
       if (!last) return false
 
-      setHighlightHistory((prev) => prev.slice(0, -1))
-      setHighlightLines((current) => {
-        const pageLines = current[last.page]
-        if (!pageLines?.length) return current
-
-        const nextPageLines = pageLines.filter((line) => line.id !== last.id)
-        if (nextPageLines.length === pageLines.length) return current
-        if (nextPageLines.length === 0) {
-          const { [last.page]: _removed, ...rest } = current
-          return rest
-        }
-
-        return {
-          ...current,
-          [last.page]: nextPageLines,
-        }
-      })
+      const nextHistory = history.slice(0, -1)
+      setHighlightHistoryState(nextHistory)
+      setHighlightLines((current) => popLastHighlight(history, current).nextLinesByPage)
       setError(null)
       setErrorCause(null)
       setSuccess('마지막 하이라이트를 취소했습니다.')
@@ -649,7 +656,7 @@ export function PdfViewer({ open, file, currentDir, onClose, onExtracted, onRena
 
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [open, onClose, fileNameModalOpen, renameModalOpen, pendingExtract, interactionLocked])
+  }, [open, onClose, fileNameModalOpen, renameModalOpen, pendingExtract, interactionLocked, setHighlightHistoryState])
 
   useEffect(() => {
     if (!pendingExtract) return
@@ -818,6 +825,11 @@ export function PdfViewer({ open, file, currentDir, onClose, onExtracted, onRena
     [],
   )
 
+  const createHighlightId = useCallback((pageNumber: number): string => {
+    highlightIdSequenceRef.current += 1
+    return `highlight-${Date.now()}-${highlightIdSequenceRef.current}-${pageNumber}`
+  }, [])
+
   const handleLineClick = useCallback(
     (event: MouseEvent<HTMLDivElement>, pageNumber: number) => {
       if (interactionLocked) return
@@ -834,7 +846,7 @@ export function PdfViewer({ open, file, currentDir, onClose, onExtracted, onRena
         lineCanvas.getBoundingClientRect(),
       )
       const line: HighlightLine = {
-        id: `highlight-${Date.now()}-${pageNumber}`,
+        id: createHighlightId(pageNumber),
         page: pageNumber,
         color: highlightColor,
         start: toCanonicalPoint({ x: HIGHLIGHT_LINE_MARGIN, y: displayPoint.y }, pageRotation),
@@ -848,14 +860,24 @@ export function PdfViewer({ open, file, currentDir, onClose, onExtracted, onRena
           [pageNumber]: [...existing, line],
         }
       })
-      setHighlightHistory((current) => [...current, { id: line.id, page: pageNumber }])
+      const nextHistory = [...highlightHistoryRef.current, { id: line.id, page: pageNumber }]
+      setHighlightHistoryState(nextHistory)
       setTimeout(() => {
         setActivePage(pageNumber)
         scrollToPage(pageNumber)
       }, 0)
       event.preventDefault()
     },
-    [highlightColor, interactionLocked, pageDisplayRotations, rotation, scrollToPage, toCanonicalPoint],
+    [
+      createHighlightId,
+      highlightColor,
+      interactionLocked,
+      pageDisplayRotations,
+      rotation,
+      scrollToPage,
+      setHighlightHistoryState,
+      toCanonicalPoint,
+    ],
   )
 
   const getRangePages = useCallback((start: number, end: number): number[] => {
@@ -1065,6 +1087,16 @@ export function PdfViewer({ open, file, currentDir, onClose, onExtracted, onRena
             <p className="file-subtitle">{pageCount > 0 ? `${pageCount}페이지` : 'Loading...'}</p>
           </div>
           <div style={{ display: 'flex', gap: 8 }}>
+            {isPdf && (
+              <>
+                <button className="ghost" onClick={onOpenMerge} disabled={!canMergePdf || interactionLocked}>
+                  PDF 병합
+                </button>
+                <button className="primary" onClick={handleExtractClick} disabled={!canExtract}>
+                  {extracting ? '추출 중...' : 'PDF 페이지 추출'}
+                </button>
+              </>
+            )}
             <button className="ghost" onClick={() => setRenameModalOpen(true)} disabled={!viewerFile || loading || interactionLocked}>
               이름 바꾸기
             </button>
@@ -1116,9 +1148,6 @@ export function PdfViewer({ open, file, currentDir, onClose, onExtracted, onRena
             <span className="meta-pill">Ctrl/Cmd+휠 줌</span>
             <span className="meta-pill">Ctrl/Cmd+Z 하이라이트 취소</span>
 
-            <button className="primary" onClick={handleExtractClick} disabled={!canExtract}>
-              {extracting ? '추출 중...' : '선택 추출'}
-            </button>
             <button
               className="ghost"
               onClick={() => void doSaveHighlights()}
