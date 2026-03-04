@@ -328,6 +328,7 @@ export function PdfMergeModal({ open, pdfFiles, currentDir, onClose, onMerged, o
 
       setSuccess(appendWarningsMessage(`${result.totalPages}개 페이지로 병합 완료: ${outputPath}`, warnings))
       onMerged()
+      onClose()
     } catch (e) {
       setResolvedError(e, 'PDF 병합에 실패했습니다.')
     } finally {

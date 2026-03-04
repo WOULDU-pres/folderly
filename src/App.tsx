@@ -2101,12 +2101,6 @@ export default function App() {
   }
 
   useEffect(() => {
-    if (!pdfModalOpen && mergePdfModalOpen) {
-      setMergePdfModalOpen(false)
-    }
-  }, [pdfModalOpen, mergePdfModalOpen])
-
-  useEffect(() => {
     const handleResize = () => {
       const width = window.innerWidth
       const height = window.innerHeight
@@ -3269,7 +3263,10 @@ export default function App() {
         file={selectedFile}
         currentDir={previewPath || currentPath}
         canMergePdf={canMergePdf}
-        onOpenMerge={() => setMergePdfModalOpen(true)}
+        onOpenMerge={() => {
+          setPdfModalOpen(false)
+          setMergePdfModalOpen(true)
+        }}
         onClose={() => setPdfModalOpen(false)}
         onExtracted={() => {
           if (currentPath) {
