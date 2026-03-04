@@ -570,7 +570,6 @@ type SortableEntryRowProps = {
   onInlineRenameCancel: () => void
   onContextMenu?: (e: React.MouseEvent, entry: ExplorerEntry) => void
   showSourceColumn: boolean
-  canExpand: boolean
   isExpanded: boolean
   isLoadingChildren: boolean
   onToggleExpand?: (folder: FolderItem) => void
@@ -598,7 +597,6 @@ function SortableEntryRow({
   onInlineRenameCancel,
   onContextMenu,
   showSourceColumn,
-  canExpand,
   isExpanded,
   isLoadingChildren,
   onToggleExpand,
@@ -618,7 +616,7 @@ function SortableEntryRow({
   const locationTooltip = sourceFolderHint?.path || sourceLocationLabel || locationLabel
   const locationDotColor = sourceFolderHint?.color || 'var(--text-table-head)'
   const entryIconTone = entry.kind === 'folder' ? 'entry-icon-folder' : resolveFileIconTone(entry.ext)
-  const normalizedCanExpand = entry.kind === 'folder' && canExpand
+  const normalizedCanExpand = entry.kind === 'folder'
   const isExpandedRow = entry.kind === 'folder' && isExpanded
   const isLoadingRowChildren = entry.kind === 'folder' && isLoadingChildren
   const handleToggleClick = (event: React.MouseEvent) => {
@@ -630,9 +628,7 @@ function SortableEntryRow({
 
   const folderToggleLabel = isLoadingRowChildren
     ? '하위 폴더 불러오는 중'
-    : !normalizedCanExpand
-      ? '하위 폴더 없음'
-      : isExpandedRow
+    : isExpandedRow
       ? '하위 폴더 접기'
       : '하위 폴더 펼치기'
 
@@ -721,8 +717,6 @@ function SortableEntryRow({
           <button
             type="button"
             className={`folder-toggle ${isExpandedRow ? 'expanded' : normalizedCanExpand ? 'collapsed' : 'leaf'}`}
-            aria-disabled={!normalizedCanExpand}
-            disabled={!normalizedCanExpand}
             aria-label={folderToggleLabel}
             aria-expanded={isExpandedRow}
             onClick={handleToggleClick}
@@ -2980,7 +2974,6 @@ export default function App() {
   const getRightPanelFolderToggleState = (entry: ExplorerEntry) => {
     if (entry.kind !== 'folder') {
       return {
-        canExpand: false,
         isExpanded: false,
         isLoadingChildren: false,
       }
@@ -2990,10 +2983,7 @@ export default function App() {
     const isLoadingChildren = entryChildrenLoadingIds.has(entry.id)
     // Keep the toggle available even when the folder is currently empty.
     // Otherwise once an empty folder is collapsed, it becomes permanently disabled.
-    const canExpand = true
-
     return {
-      canExpand,
       isExpanded,
       isLoadingChildren,
     }
@@ -3552,7 +3542,6 @@ export default function App() {
                             handleDroppedPaths(paths, destinationPath, copyMode ? 'copy' : 'move')
                           }
                           onStartNativeDrag={tryStartNativeFileDrag}
-                          canExpand={folderToggleState.canExpand}
                           isExpanded={folderToggleState.isExpanded}
                           isLoadingChildren={folderToggleState.isLoadingChildren}
                           onToggleExpand={toggleRightPanelFolderExpansion}
