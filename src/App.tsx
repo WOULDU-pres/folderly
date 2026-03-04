@@ -2988,9 +2988,9 @@ export default function App() {
 
     const isExpanded = expandedEntryFolderIds.has(entry.id)
     const isLoadingChildren = entryChildrenLoadingIds.has(entry.id)
-    const childEntries = getSortedEntryChildren(entry.id)
-    const hasLoadedChildren = entryChildrenByFolderId.has(entry.id)
-    const canExpand = isLoadingChildren || !hasLoadedChildren || isExpanded || childEntries.length > 0
+    // Keep the toggle available even when the folder is currently empty.
+    // Otherwise once an empty folder is collapsed, it becomes permanently disabled.
+    const canExpand = true
 
     return {
       canExpand,
