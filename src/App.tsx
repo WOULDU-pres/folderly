@@ -56,7 +56,7 @@ import { ContextMenu, type ContextMenuItem } from './components/ContextMenu'
 import { BookmarkItem, DriveItem, FileItem, FolderItem, OrderMode, SortMode } from './types'
 import { mergeManualOrder, sortFiles, sortFolders } from './utils/folderOrder'
 import { extLabel, formatBytes, formatDate } from './utils/format'
-import { encodeFileSrcUrl, getFileDirectory, withPreservedExtension } from './utils/path'
+import { encodeFileSrcUrl, getFileDirectory, normalizePathForComparison, withPreservedExtension } from './utils/path'
 import { resolvePasteTarget } from './utils/pasteTarget'
 import { ENTRY_DRAG_MIME, encodeDragPayload, normalizeDragPaths, parseDragPayload } from './utils/dragPayload'
 import { shouldHandleExplorerUndoShortcut } from './utils/undoShortcut'
@@ -1275,7 +1275,34 @@ export default function App() {
         .map(({ kind: _kind, ...file }) => file),
     [orderedEntries],
   )
-  const canMergePdf = previewPdfFiles.length >= 2
+  const selectedPdfDirectory = useMemo(() => {
+    if (!selectedFile || selectedFile.ext.toLowerCase() !== 'pdf') return null
+    return getFileDirectory(selectedFile.path)
+  }, [selectedFile])
+  const mergePdfFiles = useMemo<FileItem[]>(() => {
+    if (!selectedPdfDirectory) return []
+
+    const normalizedSelectedDir = normalizePathForComparison(selectedPdfDirectory)
+    const visibleDirectoryFiles = dedupeById(
+      allKnownEntryNodes
+        .filter(
+          (entry): entry is Extract<ExplorerEntry, { kind: 'file' }> =>
+            entry.kind === 'file' &&
+            entry.ext.toLowerCase() === 'pdf' &&
+            normalizePathForComparison(getFileDirectory(entry.path)) === normalizedSelectedDir,
+        )
+        .map(({ kind: _kind, ...file }) => file),
+    )
+    if (visibleDirectoryFiles.length > 0) {
+      return visibleDirectoryFiles
+    }
+
+    return previewPdfFiles.filter(
+      (file) => normalizePathForComparison(getFileDirectory(file.path)) === normalizedSelectedDir,
+    )
+  }, [selectedPdfDirectory, allKnownEntryNodes, previewPdfFiles])
+  const canMergePdf = mergePdfFiles.length >= 2
+  const mergeCurrentDir = selectedPdfDirectory || previewPath || currentPath || ''
 
   const cutPathSet = useMemo(
     () => new Set(clipboard?.mode === 'cut' ? clipboard.paths : []),
@@ -3288,8 +3315,8 @@ export default function App() {
 
       <PdfMergeModal
         open={mergePdfModalOpen}
-        pdfFiles={previewPdfFiles}
-        currentDir={previewPath || currentPath}
+        pdfFiles={mergePdfFiles}
+        currentDir={mergeCurrentDir}
         onClose={() => setMergePdfModalOpen(false)}
         onMerged={() => {
           const targetPreview = previewPath || currentPath
