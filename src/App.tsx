@@ -30,6 +30,7 @@ import {
   File,
   FileText,
   Folder,
+  FolderOpen,
   FolderPlus,
   Grid2x2,
   GripVertical,
@@ -2087,6 +2088,17 @@ export default function App() {
     }
   }
 
+  async function openEntryInFileExplorer(entry: ExplorerEntry) {
+    const targetPath = entry.kind === 'folder' ? entry.path : getFileDirectory(entry.path)
+    if (!targetPath) return
+
+    try {
+      await invoke('open_path_in_system', { path: targetPath })
+    } catch (e) {
+      setError(resolveErrorMessage(e, '파일 익스플로러에서 열지 못했습니다.'))
+    }
+  }
+
   useEffect(() => {
     if (!pdfModalOpen && mergePdfModalOpen) {
       setMergePdfModalOpen(false)
@@ -2674,6 +2686,12 @@ export default function App() {
         shortcut: 'Enter',
         disabled: !entry,
         onClick: () => { if (entry) void openEntry(entry) },
+      },
+      {
+        label: '파일 익스플로러로 열기',
+        icon: <FolderOpen size={14} />,
+        disabled: !entry,
+        onClick: () => { if (entry) void openEntryInFileExplorer(entry) },
       },
       {
         label: '이름 바꾸기',
