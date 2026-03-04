@@ -1,6 +1,7 @@
 import { useEffect, useRef } from 'react'
 
 export type ContextMenuItem = {
+  type?: 'item'
   label: string
   icon?: React.ReactNode
   shortcut?: string
@@ -9,11 +10,22 @@ export type ContextMenuItem = {
   onClick: () => void
 }
 
+export type ContextMenuSection = {
+  type: 'section'
+  label: string
+}
+
+export type ContextMenuDivider = {
+  type: 'divider'
+}
+
+export type ContextMenuEntry = ContextMenuItem | ContextMenuSection | ContextMenuDivider
+
 type ContextMenuProps = {
   open: boolean
   x: number
   y: number
-  items: ContextMenuItem[]
+  items: ContextMenuEntry[]
   onClose: () => void
 }
 
@@ -80,41 +92,75 @@ export function ContextMenu({ open, x, y, items, onClose }: ContextMenuProps) {
         fontSize: 14,
       }}
     >
-      {items.map((item, i) => (
-        <button
-          key={i}
-          role="menuitem"
-          disabled={item.disabled}
-          onClick={() => {
-            item.onClick()
-            onClose()
-          }}
-          style={{
-            display: 'flex',
-            alignItems: 'center',
-            gap: 8,
-            width: '100%',
-            padding: '8px 12px',
-            border: 'none',
-            background: 'transparent',
-            color: item.danger ? 'var(--danger, #b4232f)' : item.disabled ? 'var(--muted, #999)' : 'var(--text, #1f1f1f)',
-            cursor: item.disabled ? 'not-allowed' : 'pointer',
-            textAlign: 'left',
-            font: 'inherit',
-            opacity: item.disabled ? 0.5 : 1,
-          }}
-          onMouseEnter={(e) => {
-            if (!item.disabled) (e.currentTarget.style.background = 'var(--bg-hover, #f3f5f8)')
-          }}
-          onMouseLeave={(e) => {
-            e.currentTarget.style.background = 'transparent'
-          }}
-        >
-          {item.icon && <span style={{ display: 'inline-flex', width: 16, justifyContent: 'center' }}>{item.icon}</span>}
-          <span style={{ flex: 1 }}>{item.label}</span>
-          {item.shortcut && <span style={{ color: 'var(--muted, #999)', fontSize: 12 }}>{item.shortcut}</span>}
-        </button>
-      ))}
+      {items.map((item, i) => {
+        if (item.type === 'divider') {
+          return (
+            <div
+              key={`divider-${i}`}
+              role="separator"
+              style={{
+                height: 1,
+                margin: '6px 8px',
+                background: 'var(--border, #e1e4ea)',
+              }}
+            />
+          )
+        }
+
+        if (item.type === 'section') {
+          return (
+            <div
+              key={`section-${i}`}
+              style={{
+                padding: '6px 12px 4px',
+                fontSize: 11,
+                fontWeight: 600,
+                letterSpacing: '0.03em',
+                color: 'var(--muted, #6b7280)',
+                textTransform: 'uppercase',
+              }}
+            >
+              {item.label}
+            </div>
+          )
+        }
+
+        return (
+          <button
+            key={`item-${i}`}
+            role="menuitem"
+            disabled={item.disabled}
+            onClick={() => {
+              item.onClick()
+              onClose()
+            }}
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 8,
+              width: '100%',
+              padding: '8px 12px',
+              border: 'none',
+              background: 'transparent',
+              color: item.danger ? 'var(--danger, #b4232f)' : item.disabled ? 'var(--muted, #999)' : 'var(--text, #1f1f1f)',
+              cursor: item.disabled ? 'not-allowed' : 'pointer',
+              textAlign: 'left',
+              font: 'inherit',
+              opacity: item.disabled ? 0.5 : 1,
+            }}
+            onMouseEnter={(e) => {
+              if (!item.disabled) (e.currentTarget.style.background = 'var(--bg-hover, #f3f5f8)')
+            }}
+            onMouseLeave={(e) => {
+              e.currentTarget.style.background = 'transparent'
+            }}
+          >
+            {item.icon && <span style={{ display: 'inline-flex', width: 16, justifyContent: 'center' }}>{item.icon}</span>}
+            <span style={{ flex: 1 }}>{item.label}</span>
+            {item.shortcut && <span style={{ color: 'var(--muted, #999)', fontSize: 12 }}>{item.shortcut}</span>}
+          </button>
+        )
+      })}
     </div>
   )
 }

@@ -475,7 +475,7 @@ select {
 
 .sidebar-row {
   display: grid;
-  grid-template-columns: auto auto minmax(0, 1fr);
+  grid-template-columns: auto auto minmax(0, 1fr) auto;
   align-items: center;
   gap: 6px;
   min-height: 44px;
@@ -552,7 +552,7 @@ select {
   display: inline-block;
 }
 
-.sidebar-row span {
+.sidebar-row-label {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -723,6 +723,44 @@ select {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.entry-name-label {
+  flex: 1 1 auto;
+}
+
+.folder-status-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 22px;
+  border-radius: 999px;
+  padding: 0 7px;
+  font-size: 12px;
+  line-height: 1;
+  border: 1px solid var(--border);
+  color: var(--text-table-head);
+  background: var(--bg-card);
+  flex: 0 0 auto;
+}
+
+.folder-status-chip.progress {
+  background: var(--bg-hover);
+}
+
+.folder-status-chip.complete {
+  color: var(--success);
+  border-color: color-mix(in srgb, var(--success) 32%, var(--border));
+  background: color-mix(in srgb, var(--success-bg) 75%, transparent);
+}
+
+.folder-status-chip.inline {
+  margin-left: 6px;
+}
+
+.folder-status-chip.gallery {
+  align-self: center;
+  margin-top: -6px;
 }
 
 .entry-location {
@@ -1564,6 +1602,105 @@ select {
   display: flex;
   justify-content: flex-end;
   gap: 8px;
+}
+
+.required-docs-modal-card {
+  width: min(520px, 92vw);
+  border-radius: 14px;
+  border: 1px solid var(--border);
+  background: var(--bg-card);
+  box-shadow: var(--shadow);
+  padding: 18px;
+  display: grid;
+  gap: 12px;
+}
+
+.required-docs-modal-head h3 {
+  margin: 0;
+  font-size: 17px;
+}
+
+.required-docs-modal-head p {
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.required-docs-input-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+}
+
+.required-docs-input-row input {
+  height: 38px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--bg-pane);
+  color: inherit;
+  padding: 0 11px;
+  font-size: 14px;
+}
+
+.required-docs-help {
+  margin: -4px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.required-docs-chip-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  max-height: min(38vh, 260px);
+  overflow: auto;
+}
+
+.required-docs-empty {
+  color: var(--muted);
+  font-size: 13px;
+  padding: 6px 2px;
+}
+
+.required-docs-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 6px 4px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--bg-pane);
+  max-width: 100%;
+}
+
+.required-docs-chip span {
+  font-size: 13px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.required-docs-chip button {
+  width: 22px;
+  height: 22px;
+  border-radius: 999px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--muted);
+  display: inline-grid;
+  place-items: center;
+  cursor: pointer;
+}
+
+.required-docs-chip button:hover {
+  background: var(--bg-hover);
+  color: var(--danger);
 }
 
 .ghost,

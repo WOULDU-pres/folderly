@@ -36,6 +36,7 @@ import {
   GripVertical,
   FolderDown,
   HardDrive,
+  ListChecks,
   List,
   Menu,
   Monitor,
@@ -51,8 +52,9 @@ import {
 import { PdfViewer } from './components/PdfViewer'
 import { PdfMergeModal } from './components/PdfMergeModal'
 import { FileNameModal } from './components/FileNameModal'
+import { RequiredDocumentsModal } from './components/RequiredDocumentsModal'
 import { SearchBar } from './components/SearchBar'
-import { ContextMenu, type ContextMenuItem } from './components/ContextMenu'
+import { ContextMenu, type ContextMenuEntry } from './components/ContextMenu'
 import { BookmarkItem, DriveItem, FileItem, FolderItem, OrderMode, SortMode } from './types'
 import { mergeManualOrder, sortFiles, sortFolders } from './utils/folderOrder'
 import { extLabel, formatBytes, formatDate } from './utils/format'
@@ -67,6 +69,8 @@ const FOLDER_PAGE_SIZE = 300
 const ENTRY_PAGE_SIZE = 300
 const SHARED_CLIPBOARD_EVENT = 'app://shared-clipboard-updated'
 const SHARED_CLIPBOARD_LOCAL_KEY = 'explorer.sharedClipboard.v1'
+const FOLDER_CHECKLIST_STORAGE_KEY = 'explorer.folderChecklist.v1'
+const FOLDER_STATUS_FETCH_CONCURRENCY = 8
 const NATIVE_DRAG_PREVIEW_ICON = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADElEQVR42mP4z8DwHwAFAAH/tkY6rQAAAABJRU5ErkJggg=='
 const DROP_EVENT_DEDUPE_WINDOW_MS = 300
 type SortField = 'name' | 'modifiedAt' | 'size'
@@ -84,6 +88,142 @@ type SourceFolderHint = {
   normalizedPath: string
   label: string
   color: string
+}
+
+type FolderChecklistConfig = {
+  requiredFileNames: string[]
+  manualCompleted: boolean
+}
+
+type FolderChecklistMap = Record<string, FolderChecklistConfig>
+
+type FolderProgressSnapshot = {
+  matchedCount: number
+  requiredCount: number
+}
+
+type FolderCompletionBadge = {
+  complete: boolean
+  progressLabel: string | null
+}
+
+function getFolderChecklistKey(path: string): string {
+  return normalizePathForComparison(path)
+}
+
+function normalizeRequiredFileName(name: string): string {
+  return name.trim()
+}
+
+function removeFileExtension(name: string): string {
+  const trimmed = name.trim()
+  const dotIndex = trimmed.lastIndexOf('.')
+  if (dotIndex <= 0) return trimmed
+  return trimmed.slice(0, dotIndex)
+}
+
+function sanitizeRequiredFileNames(names: string[]): string[] {
+  const seen = new Set<string>()
+  const cleaned: string[] = []
+
+  for (const name of names) {
+    const trimmed = normalizeRequiredFileName(name)
+    if (!trimmed) continue
+    const normalized = trimmed.toLocaleLowerCase()
+    if (seen.has(normalized)) continue
+    seen.add(normalized)
+    cleaned.push(trimmed)
+  }
+
+  return cleaned
+}
+
+function parseFolderChecklistStorage(raw: unknown): FolderChecklistMap {
+  if (!raw || typeof raw !== 'object') {
+    return {}
+  }
+
+  const result: FolderChecklistMap = {}
+  for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
+    if (!value || typeof value !== 'object') continue
+    const candidate = value as { requiredFileNames?: unknown; manualCompleted?: unknown }
+    const requiredFileNames = Array.isArray(candidate.requiredFileNames)
+      ? sanitizeRequiredFileNames(
+        candidate.requiredFileNames.filter((name): name is string => typeof name === 'string'),
+      )
+      : []
+    const manualCompleted = Boolean(candidate.manualCompleted)
+    if (!manualCompleted && requiredFileNames.length === 0) continue
+    result[key] = {
+      requiredFileNames,
+      manualCompleted,
+    }
+  }
+
+  return result
+}
+
+function resolveFolderChecklistConfig(
+  checklistByPath: FolderChecklistMap,
+  folderPath: string,
+): FolderChecklistConfig | null {
+  return checklistByPath[getFolderChecklistKey(folderPath)] ?? null
+}
+
+function countMatchedRequiredFiles(requiredFileNames: string[], files: FileItem[]): number {
+  if (requiredFileNames.length === 0) return 0
+
+  const exactFileNameSet = new Set(files.map((file) => file.name.trim().toLocaleLowerCase()))
+  const baseFileNameSet = new Set(files.map((file) => removeFileExtension(file.name).toLocaleLowerCase()))
+
+  let matched = 0
+  for (const requiredName of requiredFileNames) {
+    const normalizedRequired = requiredName.toLocaleLowerCase()
+    const hasExtension = requiredName.includes('.')
+
+    if (hasExtension) {
+      if (exactFileNameSet.has(normalizedRequired)) matched += 1
+      continue
+    }
+
+    if (exactFileNameSet.has(normalizedRequired) || baseFileNameSet.has(normalizedRequired)) {
+      matched += 1
+    }
+  }
+
+  return matched
+}
+
+function resolveFolderCompletionBadge(
+  folderPath: string,
+  checklistByPath: FolderChecklistMap,
+  progressByPath: Record<string, FolderProgressSnapshot>,
+): FolderCompletionBadge | null {
+  const checklist = resolveFolderChecklistConfig(checklistByPath, folderPath)
+  if (!checklist) return null
+
+  if (checklist.manualCompleted) {
+    return {
+      complete: true,
+      progressLabel: null,
+    }
+  }
+
+  if (checklist.requiredFileNames.length === 0) {
+    return null
+  }
+
+  const key = getFolderChecklistKey(folderPath)
+  const snapshot = progressByPath[key]
+  const matchedCount = snapshot
+    ? Math.min(snapshot.matchedCount, checklist.requiredFileNames.length)
+    : 0
+  const requiredCount = checklist.requiredFileNames.length
+
+  return {
+    complete: requiredCount > 0 && matchedCount >= requiredCount,
+    progressLabel: `${matchedCount}/${requiredCount}`,
+  }
 }
 
 function resolveSortField(mode: SortMode): SortField {
@@ -164,6 +304,7 @@ function clearNativeDragHighlight(ref: { current: HTMLElement | null }): void {
 type SortableFolderRowProps = {
   folder: FolderItem
   selected: boolean
+  completionBadge: FolderCompletionBadge | null
   manualMode: boolean
   sortable: boolean
   depth: number
@@ -299,6 +440,7 @@ function resolveDropCopyMode(event: ReactDragEvent): boolean {
 function SortableFolderRow({
   folder,
   selected,
+  completionBadge,
   manualMode,
   sortable,
   depth,
@@ -380,7 +522,25 @@ function SortableFolderRow({
         <GripVertical size={16} />
       </button>
       <Folder size={16} className="entry-kind-icon entry-icon-folder" />
-      <span>{folder.name}</span>
+      <span className="sidebar-row-label">{folder.name}</span>
+      {completionBadge && (
+        <span
+          className={`folder-status-chip ${completionBadge.complete ? 'complete' : 'progress'}`}
+          title={
+            completionBadge.progressLabel
+              ? `필수 문서 진행률 ${completionBadge.progressLabel}`
+              : '완료로 표시됨'
+          }
+          aria-label={
+            completionBadge.progressLabel
+              ? `필수 문서 진행률 ${completionBadge.progressLabel}`
+              : '완료로 표시됨'
+          }
+        >
+          {completionBadge.complete && <CheckCircle2 size={13} />}
+          {completionBadge.progressLabel && <span>{completionBadge.progressLabel}</span>}
+        </span>
+      )}
     </li>
   )
 }
@@ -391,6 +551,7 @@ type SidebarSelectModifiers = Pick<SelectModifiers, 'ctrl'>
 type SortableEntryRowProps = {
   entry: ExplorerEntry
   selected: boolean
+  folderCompletionBadge: FolderCompletionBadge | null
   manualMode: boolean
   sortable: boolean
   depth: number
@@ -418,6 +579,7 @@ type SortableEntryRowProps = {
 function SortableEntryRow({
   entry,
   selected,
+  folderCompletionBadge,
   manualMode,
   sortable,
   depth,
@@ -614,6 +776,24 @@ function SortableEntryRow({
             {entry.name}
           </span>
         )}
+        {entry.kind === 'folder' && folderCompletionBadge && (
+          <span
+            className={`folder-status-chip inline ${folderCompletionBadge.complete ? 'complete' : 'progress'}`}
+            title={
+              folderCompletionBadge.progressLabel
+                ? `필수 문서 진행률 ${folderCompletionBadge.progressLabel}`
+                : '완료로 표시됨'
+            }
+            aria-label={
+              folderCompletionBadge.progressLabel
+                ? `필수 문서 진행률 ${folderCompletionBadge.progressLabel}`
+                : '완료로 표시됨'
+            }
+          >
+            {folderCompletionBadge.complete && <CheckCircle2 size={13} />}
+            {folderCompletionBadge.progressLabel && <span>{folderCompletionBadge.progressLabel}</span>}
+          </span>
+        )}
       </span>
       <span role="gridcell">{entry.kind === 'folder' ? '폴더' : extLabel(entry.ext)}</span>
       <span role="gridcell">{entry.kind === 'folder' ? '-' : formatBytes(entry.size)}</span>
@@ -636,6 +816,7 @@ function SortableEntryRow({
 type SortableGalleryCardProps = {
   entry: ExplorerEntry
   selected: boolean
+  folderCompletionBadge: FolderCompletionBadge | null
   manualMode: boolean
   dragPaths: string[]
   sourceFolderHint?: SourceFolderHint | null
@@ -658,6 +839,7 @@ type SortableGalleryCardProps = {
 function SortableGalleryCard({
   entry,
   selected,
+  folderCompletionBadge,
   manualMode,
   dragPaths,
   sourceFolderHint,
@@ -815,6 +997,19 @@ function SortableGalleryCard({
         <strong className="gallery-name" title={entry.name}>
           {entry.name}
         </strong>
+      )}
+      {entry.kind === 'folder' && folderCompletionBadge && (
+        <span
+          className={`folder-status-chip gallery ${folderCompletionBadge.complete ? 'complete' : 'progress'}`}
+          title={
+            folderCompletionBadge.progressLabel
+              ? `필수 문서 진행률 ${folderCompletionBadge.progressLabel}`
+              : '완료로 표시됨'
+          }
+        >
+          {folderCompletionBadge.complete && <CheckCircle2 size={13} />}
+          {folderCompletionBadge.progressLabel && <span>{folderCompletionBadge.progressLabel}</span>}
+        </span>
       )}
       <div className="gallery-meta">
         <span className="gallery-type">{entry.kind === 'folder' ? '폴더' : extLabel(entry.ext)}</span>
@@ -1088,6 +1283,7 @@ export default function App() {
 
   // Phase E1: Context menu
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null)
+  const [contextMenuFolderTarget, setContextMenuFolderTarget] = useState<FolderItem | null>(null)
   const [selectedSidebarFolderIds, setSelectedSidebarFolderIds] = useState<string[]>([])
   const [expandedEntryFolderIds, setExpandedEntryFolderIds] = useState<Set<string>>(new Set())
   const expandedEntryFolderIdsRef = useRef<Set<string>>(new Set())
@@ -1097,6 +1293,10 @@ export default function App() {
   const [visibleEntryCount, setVisibleEntryCount] = useState(ENTRY_PAGE_SIZE)
   const [undoToastMessage, setUndoToastMessage] = useState<string | null>(null)
   const [isOpeningSecondaryWindow, setIsOpeningSecondaryWindow] = useState(false)
+  const [requiredDocsModalTarget, setRequiredDocsModalTarget] = useState<{ path: string; name: string } | null>(null)
+  const [folderChecklistByPath, setFolderChecklistByPath] = useState<FolderChecklistMap>({})
+  const [folderProgressByPath, setFolderProgressByPath] = useState<Record<string, FolderProgressSnapshot>>({})
+  const [folderStatusRefreshToken, setFolderStatusRefreshToken] = useState(0)
 
   const sortedFolders = useMemo(() => sortFolders(folders, sortMode), [folders, sortMode])
   const displayFolders = useMemo(
@@ -1225,6 +1425,53 @@ export default function App() {
     [selectedEntryIds, entryById],
   )
 
+  const folderPathsForCompletion = useMemo(() => {
+    const pathSet = new Set<string>()
+    visibleFolders.forEach((folder) => pathSet.add(folder.path))
+
+    const candidateEntries = viewMode === 'list' ? visibleEntries : visibleRootEntries
+    candidateEntries.forEach((entry) => {
+      if (entry.kind !== 'folder') return
+      pathSet.add(entry.path)
+    })
+
+    return Array.from(pathSet)
+  }, [visibleFolders, visibleEntries, visibleRootEntries, viewMode])
+
+  const folderProgressTargets = useMemo(
+    () =>
+      folderPathsForCompletion
+        .map((path) => {
+          const checklist = resolveFolderChecklistConfig(folderChecklistByPath, path)
+          if (!checklist || checklist.manualCompleted || checklist.requiredFileNames.length === 0) return null
+          return {
+            key: getFolderChecklistKey(path),
+            path,
+            requiredFileNames: checklist.requiredFileNames,
+          }
+        })
+        .filter((target): target is { key: string; path: string; requiredFileNames: string[] } => Boolean(target)),
+    [folderPathsForCompletion, folderChecklistByPath],
+  )
+
+  const folderCompletionByPath = useMemo(() => {
+    const map = new Map<string, FolderCompletionBadge>()
+    for (const path of folderPathsForCompletion) {
+      const badge = resolveFolderCompletionBadge(path, folderChecklistByPath, folderProgressByPath)
+      if (!badge) continue
+      map.set(getFolderChecklistKey(path), badge)
+    }
+    return map
+  }, [folderPathsForCompletion, folderChecklistByPath, folderProgressByPath])
+
+  const getFolderCompletionBadge = (folderPath: string): FolderCompletionBadge | null =>
+    folderCompletionByPath.get(getFolderChecklistKey(folderPath)) ?? null
+
+  const requiredDocsInitialDocuments = useMemo(() => {
+    if (!requiredDocsModalTarget) return []
+    return resolveFolderChecklistConfig(folderChecklistByPath, requiredDocsModalTarget.path)?.requiredFileNames ?? []
+  }, [requiredDocsModalTarget, folderChecklistByPath])
+
   const showSourceColumn = useMemo(() => selectedSidebarFolderIds.length > 1, [selectedSidebarFolderIds])
   const sourceFolderHints = useMemo(
     () => buildSourceFolderHints(folders, selectedSidebarFolderIds),
@@ -1308,6 +1555,73 @@ export default function App() {
     () => new Set(clipboard?.mode === 'cut' ? clipboard.paths : []),
     [clipboard],
   )
+
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(FOLDER_CHECKLIST_STORAGE_KEY)
+      if (!raw) return
+      const parsed = JSON.parse(raw)
+      setFolderChecklistByPath(parseFolderChecklistStorage(parsed))
+    } catch {
+      setFolderChecklistByPath({})
+    }
+  }, [])
+
+  useEffect(() => {
+    localStorage.setItem(FOLDER_CHECKLIST_STORAGE_KEY, JSON.stringify(folderChecklistByPath))
+  }, [folderChecklistByPath])
+
+  useEffect(() => {
+    let cancelled = false
+
+    if (folderProgressTargets.length === 0) {
+      setFolderProgressByPath({})
+      return
+    }
+
+    const fetchSnapshot = async (target: { key: string; path: string; requiredFileNames: string[] }) => {
+      try {
+        const files = await invoke<FileItem[]>('list_files', { parentPath: target.path })
+        const matchedCount = countMatchedRequiredFiles(target.requiredFileNames, files)
+        return {
+          key: target.key,
+          snapshot: {
+            matchedCount,
+            requiredCount: target.requiredFileNames.length,
+          },
+        }
+      } catch {
+        return {
+          key: target.key,
+          snapshot: {
+            matchedCount: 0,
+            requiredCount: target.requiredFileNames.length,
+          },
+        }
+      }
+    }
+
+    const run = async () => {
+      const next: Record<string, FolderProgressSnapshot> = {}
+
+      for (let index = 0; index < folderProgressTargets.length; index += FOLDER_STATUS_FETCH_CONCURRENCY) {
+        const chunk = folderProgressTargets.slice(index, index + FOLDER_STATUS_FETCH_CONCURRENCY)
+        const snapshots = await Promise.all(chunk.map(fetchSnapshot))
+        if (cancelled) return
+
+        for (const { key, snapshot } of snapshots) {
+          next[key] = snapshot
+        }
+      }
+
+      setFolderProgressByPath(next)
+    }
+
+    void run()
+    return () => {
+      cancelled = true
+    }
+  }, [folderProgressTargets, folderStatusRefreshToken])
 
   useEffect(() => {
     expandedEntryFolderIdsRef.current = expandedEntryFolderIds
@@ -1637,6 +1951,10 @@ export default function App() {
     await Promise.all([loadFolders(path), loadPreviewEntries(path)])
   }
 
+  const refreshFolderCompletionStatus = () => {
+    setFolderStatusRefreshToken((prev) => prev + 1)
+  }
+
   async function refreshExplorer() {
     await loadDrives()
     if (currentPath) {
@@ -1649,6 +1967,7 @@ export default function App() {
       )
       if (selectedFolderPaths.length > 1) {
         await loadPreviewEntries(selectedFolderPaths, { preserveExpandedState: true })
+        refreshFolderCompletionStatus()
         return
       }
     }
@@ -1657,6 +1976,7 @@ export default function App() {
     if (targetPreview) {
       await loadPreviewEntries(targetPreview, { preserveExpandedState: true })
     }
+    refreshFolderCompletionStatus()
   }
 
   function shouldSkipDuplicateDrop(paths: string[], destinationPath: string, mode: PathOperationMode): boolean {
@@ -2691,6 +3011,7 @@ export default function App() {
       lastClickedIndexRef.current = entryIndex
       ensureEntryVisible(entryIndex)
     }
+    setContextMenuFolderTarget(entry.kind === 'folder' ? entry : null)
     setContextMenu({ x: e.clientX, y: e.clientY })
   }
 
@@ -2700,13 +3021,89 @@ export default function App() {
     cancelInlineRename()
     setSelectedEntryIds([])
     lastClickedIndexRef.current = -1
+    setContextMenuFolderTarget(null)
     setContextMenu({ x: e.clientX, y: e.clientY })
   }
 
-  const contextMenuItems: ContextMenuItem[] = useMemo(() => {
+  const openRequiredDocumentsModal = (folder: FolderItem) => {
+    setRequiredDocsModalTarget({
+      path: folder.path,
+      name: folder.name,
+    })
+  }
+
+  const saveRequiredDocuments = (folderPath: string, requiredFileNames: string[]) => {
+    setFolderChecklistByPath((prev) => {
+      const key = getFolderChecklistKey(folderPath)
+      const existing = prev[key]
+      const nextRequiredFileNames = sanitizeRequiredFileNames(requiredFileNames)
+      const manualCompleted = existing?.manualCompleted ?? false
+
+      if (!manualCompleted && nextRequiredFileNames.length === 0) {
+        const { [key]: _removed, ...rest } = prev
+        return rest
+      }
+
+      return {
+        ...prev,
+        [key]: {
+          requiredFileNames: nextRequiredFileNames,
+          manualCompleted,
+        },
+      }
+    })
+    setFolderStatusRefreshToken((prev) => prev + 1)
+  }
+
+  const toggleFolderManualCompletion = (folderPath: string) => {
+    setFolderChecklistByPath((prev) => {
+      const key = getFolderChecklistKey(folderPath)
+      const existing = prev[key]
+      const requiredFileNames = existing?.requiredFileNames ?? []
+      const nextManualCompleted = !existing?.manualCompleted
+
+      if (!nextManualCompleted && requiredFileNames.length === 0) {
+        const { [key]: _removed, ...rest } = prev
+        return rest
+      }
+
+      return {
+        ...prev,
+        [key]: {
+          requiredFileNames,
+          manualCompleted: nextManualCompleted,
+        },
+      }
+    })
+    setFolderStatusRefreshToken((prev) => prev + 1)
+  }
+
+  const contextMenuItems: ContextMenuEntry[] = useMemo(() => {
     if (!contextMenu) return []
     const entry = selectedEntries.length === 1 ? selectedEntries[0] : null
-    return [
+    const items: ContextMenuEntry[] = []
+
+    if (contextMenuFolderTarget) {
+      const checklist = resolveFolderChecklistConfig(folderChecklistByPath, contextMenuFolderTarget.path)
+      const manualCompleted = checklist?.manualCompleted ?? false
+
+      items.push(
+        { type: 'section', label: '폴더 상태' },
+        {
+          label: manualCompleted ? '완료 표시 해제' : '완료로 표시',
+          icon: <CheckCircle2 size={14} />,
+          onClick: () => toggleFolderManualCompletion(contextMenuFolderTarget.path),
+        },
+        {
+          label: '필수 문서 목록 설정',
+          icon: <ListChecks size={14} />,
+          onClick: () => openRequiredDocumentsModal(contextMenuFolderTarget),
+        },
+        { type: 'divider' },
+      )
+    }
+
+    items.push(
       {
         label: '열기',
         shortcut: 'Enter',
@@ -2762,8 +3159,20 @@ export default function App() {
         disabled: selectedEntries.length === 0,
         onClick: () => void deleteSelected(),
       },
-    ]
-  }, [contextMenu, selectedEntries, selectedEntryIds, operationSelectedPaths, clipboard, canCreateFolder, actionInProgress])
+    )
+
+    return items
+  }, [
+    contextMenu,
+    selectedEntries,
+    selectedEntryIds,
+    operationSelectedPaths,
+    clipboard,
+    canCreateFolder,
+    actionInProgress,
+    contextMenuFolderTarget,
+    folderChecklistByPath,
+  ])
 
   const handleAddBookmark = () => {
     const targetPath = previewPath || currentPath
@@ -3004,6 +3413,7 @@ export default function App() {
                           key={folder.id}
                           folder={folder}
                           selected={selectedSidebarFolderIdSet.has(folder.id)}
+                          completionBadge={getFolderCompletionBadge(folder.path)}
                           manualMode={orderMode === 'manual'}
                           sortable
                           depth={0}
@@ -3126,6 +3536,7 @@ export default function App() {
                           key={row.key}
                           entry={entry}
                           selected={selectedEntryIdSet.has(entry.id)}
+                          folderCompletionBadge={entry.kind === 'folder' ? getFolderCompletionBadge(entry.path) : null}
                           manualMode={orderMode === 'manual'}
                           sortable={row.depth === 0}
                           depth={row.depth}
@@ -3202,6 +3613,7 @@ export default function App() {
                         key={entry.id}
                         entry={entry}
                         selected={selectedEntryIdSet.has(entry.id)}
+                        folderCompletionBadge={entry.kind === 'folder' ? getFolderCompletionBadge(entry.path) : null}
                         manualMode={orderMode === 'manual'}
                         dragPaths={selectedPaths}
                         isCut={cutPathSet.has(entry.path)}
@@ -3301,14 +3713,22 @@ export default function App() {
           }
           const targetPreview = previewPath || currentPath
           if (targetPreview) {
-            void loadPreviewEntries(targetPreview, { preserveExpandedState: true })
+            void loadPreviewEntries(targetPreview, { preserveExpandedState: true }).finally(() => {
+              refreshFolderCompletionStatus()
+            })
+          } else {
+            refreshFolderCompletionStatus()
           }
         }}
         onRenamed={(oldPath: string, newPath: string) => {
           setSelectedEntryIds((prev) => prev.map((id) => (id === oldPath ? newPath : id)))
           const targetPreview = previewPath || currentPath
           if (targetPreview) {
-            void loadPreviewEntries(targetPreview, { preserveExpandedState: true })
+            void loadPreviewEntries(targetPreview, { preserveExpandedState: true }).finally(() => {
+              refreshFolderCompletionStatus()
+            })
+          } else {
+            refreshFolderCompletionStatus()
           }
         }}
       />
@@ -3321,7 +3741,11 @@ export default function App() {
         onMerged={() => {
           const targetPreview = previewPath || currentPath
           if (targetPreview) {
-            void loadPreviewEntries(targetPreview, { preserveExpandedState: true })
+            void loadPreviewEntries(targetPreview, { preserveExpandedState: true }).finally(() => {
+              refreshFolderCompletionStatus()
+            })
+          } else {
+            refreshFolderCompletionStatus()
           }
         }}
       />
@@ -3343,12 +3767,27 @@ export default function App() {
         onCancel={() => setCreateFolderModalOpen(false)}
       />
 
+      <RequiredDocumentsModal
+        open={requiredDocsModalTarget !== null}
+        folderName={requiredDocsModalTarget?.name ?? ''}
+        initialDocuments={requiredDocsInitialDocuments}
+        onConfirm={(documents) => {
+          if (!requiredDocsModalTarget) return
+          saveRequiredDocuments(requiredDocsModalTarget.path, documents)
+          setRequiredDocsModalTarget(null)
+        }}
+        onCancel={() => setRequiredDocsModalTarget(null)}
+      />
+
       <ContextMenu
         open={contextMenu !== null}
         x={contextMenu?.x ?? 0}
         y={contextMenu?.y ?? 0}
         items={contextMenuItems}
-        onClose={() => setContextMenu(null)}
+        onClose={() => {
+          setContextMenu(null)
+          setContextMenuFolderTarget(null)
+        }}
       />
     </div>
   )
