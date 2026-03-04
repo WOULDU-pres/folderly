@@ -59,6 +59,7 @@ import { extLabel, formatBytes, formatDate } from './utils/format'
 import { encodeFileSrcUrl, getFileDirectory, withPreservedExtension } from './utils/path'
 import { resolvePasteTarget } from './utils/pasteTarget'
 import { ENTRY_DRAG_MIME, encodeDragPayload, normalizeDragPaths, parseDragPayload } from './utils/dragPayload'
+import { shouldHandleExplorerUndoShortcut } from './utils/undoShortcut'
 import { useExplorerStore, type ClipboardState, type ExplorerEntry, type UndoEntry } from './store/useExplorerStore'
 
 const BOOKMARK_STORAGE_KEY = 'explorer.bookmarks.v1'
@@ -2309,7 +2310,11 @@ export default function App() {
         }
         return
       }
-      if (ctrlOrMeta && !event.shiftKey && event.key.toLowerCase() === 'z') {
+      if (
+        shouldHandleExplorerUndoShortcut(event, {
+          pdfModalOpen,
+        })
+      ) {
         event.preventDefault()
         void undoLastAction()
         return
@@ -2376,7 +2381,7 @@ export default function App() {
 
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [selectedEntries, selectedEntryIds, lastSelectedEntry, visibleEntries, baseDisplayEntries, entryIndexById, previewPath, clipboard, operationInProgress, orderMode, operationSelectedPaths])
+  }, [selectedEntries, selectedEntryIds, lastSelectedEntry, visibleEntries, baseDisplayEntries, entryIndexById, previewPath, clipboard, operationInProgress, orderMode, operationSelectedPaths, pdfModalOpen])
 
   useEffect(() => {
     if (!error) return
