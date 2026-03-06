@@ -1860,22 +1860,19 @@ export default function App() {
       setSelectedEntryIds((prev) => prev.filter((id) => idSet.has(id)))
 
       if (expandedFolderIdsSnapshot.length > 0) {
-        const rootFoldersById = new Map(folderResult.map((folder) => [folder.id, folder] as const))
         const refreshedChildren = await Promise.all(
           expandedFolderIdsSnapshot.map(async (folderId) => {
-            const knownFolder = rootFoldersById.get(folderId) ?? (() => {
-              const knownEntry = entryById.get(folderId)
-              return knownEntry?.kind === 'folder' ? knownEntry : null
-            })()
-
-            if (!knownFolder) {
+            // Folder ids are path-based in this app, so restore expanded descendants by
+            // querying that path directly instead of depending on the previous in-memory tree.
+            const folderPath = folderId.trim()
+            if (!folderPath) {
               return { folderId, entries: null as ExplorerEntry[] | null }
             }
 
             try {
               const [childFolders, childFiles] = await Promise.all([
-                invoke<FolderItem[]>('list_folders', { parentPath: knownFolder.path }),
-                invoke<FileItem[]>('list_files', { parentPath: knownFolder.path }),
+                invoke<FolderItem[]>('list_folders', { parentPath: folderPath }),
+                invoke<FileItem[]>('list_files', { parentPath: folderPath }),
               ])
 
               return {
@@ -1888,7 +1885,7 @@ export default function App() {
             } catch {
               return {
                 folderId,
-                entries: [] as ExplorerEntry[],
+                entries: null as ExplorerEntry[] | null,
               }
             }
           }),
