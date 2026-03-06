@@ -3721,7 +3721,6 @@ export default function App() {
       <PdfViewer
         open={pdfModalOpen}
         file={selectedFile}
-        currentDir={previewPath || currentPath}
         canMergePdf={canMergePdf}
         onOpenMerge={() => {
           setPdfModalOpen(false)

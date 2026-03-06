@@ -39,7 +39,6 @@ type PdfDocumentProxy = {
 type PdfViewerProps = {
   open: boolean
   file: FileItem | null
-  currentDir: string
   canMergePdf: boolean
   onOpenMerge: () => void
   onClose: () => void
@@ -208,7 +207,6 @@ function appendWarningsMessage(baseMessage: string, warnings: string[]): string 
 export function PdfViewer({
   open,
   file,
-  currentDir,
   canMergePdf,
   onOpenMerge,
   onClose,
@@ -999,7 +997,7 @@ export function PdfViewer({
     setSuccess(null)
 
     try {
-      const dir = currentDir || getFileDirectory(viewerFile.path)
+      const dir = getFileDirectory(viewerFile.path)
       const outputPath = toCustomNamePdfPath(dir, fileName, defaultExtractName)
 
       if (destructive) {
