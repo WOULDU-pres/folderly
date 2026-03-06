@@ -511,6 +511,9 @@ export function PdfViewer({
 
     return () => {
       cancelled = true
+      if (skipReloadRef.current) {
+        return
+      }
       if (pdfDocRef.current) {
         void pdfDocRef.current.destroy()
         pdfDocRef.current = null
@@ -947,8 +950,42 @@ export function PdfViewer({
       // Partial selection — show confirmation before deciding destructive vs non-destructive
       setPendingExtract({ fileName, pages: sortedPages })
     } else {
-      // Full selection — always non-destructive
-      void doExtract(fileName, sortedPages, false)
+      // Full selection means no remainder; auto-rename instead of leaving a duplicate original file
+      void doExtractAllPagesByRename(fileName)
+    }
+  }
+
+  async function doExtractAllPagesByRename(fileName: string) {
+    if (!viewerFile) return
+
+    setPendingExtract(null)
+    setExtracting(true)
+    setError(null)
+    setErrorCause(null)
+    setSuccess(null)
+
+    try {
+      const finalName = withPreservedExtension(fileName, viewerFile.name)
+      const oldPath = viewerFile.path
+
+      if (finalName === viewerFile.name) {
+        setSuccess('전체 페이지가 선택되어 파일 이름을 그대로 유지했습니다.')
+        onExtracted()
+        return
+      }
+
+      const renamedPath = await invoke<string>('rename_path', { path: oldPath, newName: finalName })
+      skipReloadRef.current = true
+      lastRenderedFileSignatureRef.current = `${renamedPath}#${loadVersion}`
+      setViewerFile((prev) => (prev ? { ...prev, name: finalName, path: renamedPath, id: renamedPath } : prev))
+
+      setSuccess(`전체 페이지를 추출해 파일 이름을 변경했습니다: ${finalName}`)
+      onRenamed(oldPath, renamedPath)
+      onExtracted()
+    } catch (e) {
+      setResolvedError(e, '전체 페이지 추출 처리에 실패했습니다.')
+    } finally {
+      setExtracting(false)
     }
   }
 
@@ -1064,6 +1101,7 @@ export function PdfViewer({
 
       // Update internal file reference immediately - skip PDF reload since content hasn't changed
       skipReloadRef.current = true
+      lastRenderedFileSignatureRef.current = `${newPath}#${loadVersion}`
       setViewerFile({ ...viewerFile, name: finalName, path: newPath, id: newPath })
 
       setSuccess(`이름이 변경되었습니다: ${finalName}`)
