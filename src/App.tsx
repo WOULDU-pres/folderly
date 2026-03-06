@@ -59,7 +59,7 @@ import { BookmarkItem, DriveItem, FileItem, FolderItem, OrderMode, SortMode } fr
 import { mergeManualOrder, sortFiles, sortFolders } from './utils/folderOrder'
 import { extLabel, formatBytes, formatDate } from './utils/format'
 import { encodeFileSrcUrl, getFileDirectory, normalizePathForComparison, withPreservedExtension } from './utils/path'
-import { resolvePasteTarget } from './utils/pasteTarget'
+import { resolveCreateFolderTarget, resolvePasteTarget } from './utils/pasteTarget'
 import { ENTRY_DRAG_MIME, encodeDragPayload, normalizeDragPaths, parseDragPayload } from './utils/dragPayload'
 import { shouldHandleExplorerUndoShortcut } from './utils/undoShortcut'
 import { useExplorerStore, type ClipboardState, type ExplorerEntry, type UndoEntry } from './store/useExplorerStore'
@@ -1720,8 +1720,14 @@ export default function App() {
     }
   }
 
-  async function loadFolders(path: string): Promise<FolderItem[]> {
-    setFolderLoading(true)
+  async function loadFolders(
+    path: string,
+    options?: { showLoading?: boolean },
+  ): Promise<FolderItem[]> {
+    const showLoading = options?.showLoading ?? true
+    if (showLoading) {
+      setFolderLoading(true)
+    }
     setError(null)
 
     try {
@@ -1741,7 +1747,9 @@ export default function App() {
       setError(e instanceof Error ? e.message : '폴더를 불러오지 못했습니다.')
       return []
     } finally {
-      setFolderLoading(false)
+      if (showLoading) {
+        setFolderLoading(false)
+      }
     }
   }
 
@@ -1808,10 +1816,13 @@ export default function App() {
 
   async function loadPreviewEntries(
     pathOrPaths: string | string[],
-    options?: { preserveExpandedState?: boolean },
+    options?: { preserveExpandedState?: boolean; showLoading?: boolean },
   ) {
     const preserveExpandedState = options?.preserveExpandedState ?? false
-    setPreviewLoading(true)
+    const showLoading = options?.showLoading ?? true
+    if (showLoading) {
+      setPreviewLoading(true)
+    }
     setError(null)
     if (!preserveExpandedState) {
       setExpandedEntryFolderIds(new Set())
@@ -1822,7 +1833,8 @@ export default function App() {
       ? Array.from(new Set(pathOrPaths.filter((path) => path.length > 0)))
       : [pathOrPaths]
     const expandedFolderIdsSnapshot = preserveExpandedState ? Array.from(expandedEntryFolderIdsRef.current) : []
-    if (expandedFolderIdsSnapshot.length > 0) {
+    const showExpandedFolderLoading = showLoading && expandedFolderIdsSnapshot.length > 0
+    if (showExpandedFolderLoading) {
       setEntryChildrenLoadingIds((prev) => {
         const next = new Set(prev)
         expandedFolderIdsSnapshot.forEach((id) => next.add(id))
@@ -1918,14 +1930,16 @@ export default function App() {
       setPreviewFiles([])
       setSelectedEntryIds([])
     } finally {
-      if (expandedFolderIdsSnapshot.length > 0) {
+      if (showExpandedFolderLoading) {
         setEntryChildrenLoadingIds((prev) => {
           const next = new Set(prev)
           expandedFolderIdsSnapshot.forEach((id) => next.delete(id))
           return next
         })
       }
-      setPreviewLoading(false)
+      if (showLoading) {
+        setPreviewLoading(false)
+      }
     }
   }
 
@@ -1952,7 +1966,7 @@ export default function App() {
   async function refreshExplorer() {
     await loadDrives()
     if (currentPath) {
-      await loadFolders(currentPath)
+      await loadFolders(currentPath, { showLoading: false })
     }
 
     if (selectedSidebarFolderIds.length > 1) {
@@ -1960,7 +1974,7 @@ export default function App() {
         new Set(selectedSidebarFolderIds.map((id) => allKnownFolderById.get(id)?.path).filter((path): path is string => Boolean(path))),
       )
       if (selectedFolderPaths.length > 1) {
-        await loadPreviewEntries(selectedFolderPaths, { preserveExpandedState: true })
+        await loadPreviewEntries(selectedFolderPaths, { preserveExpandedState: true, showLoading: false })
         refreshFolderCompletionStatus()
         return
       }
@@ -1968,7 +1982,7 @@ export default function App() {
 
     const targetPreview = previewPath || currentPath
     if (targetPreview) {
-      await loadPreviewEntries(targetPreview, { preserveExpandedState: true })
+      await loadPreviewEntries(targetPreview, { preserveExpandedState: true, showLoading: false })
     }
     refreshFolderCompletionStatus()
   }
@@ -2277,15 +2291,36 @@ export default function App() {
   }
 
   function createNewFolder() {
-    const targetPath = previewPath || currentPath
-    if (!targetPath) return
+    const targetResolution = resolveCreateFolderTarget({
+      selectedFolderTargets: selectedEntries
+        .filter((entry) => entry.kind === 'folder')
+        .map((entry) => entry.path),
+      previewPath,
+      currentPath,
+    })
+
+    if (targetResolution.error || !targetResolution.targetPath) {
+      setError(targetResolution.error ?? '새 폴더를 만들 위치를 찾을 수 없습니다.')
+      return
+    }
+
     setCreateFolderModalOpen(true)
   }
 
   async function handleCreateFolderConfirm(nextName: string) {
     setCreateFolderModalOpen(false)
-    const targetPath = previewPath || currentPath
-    if (!targetPath) return
+    const targetResolution = resolveCreateFolderTarget({
+      selectedFolderTargets: selectedEntries
+        .filter((entry) => entry.kind === 'folder')
+        .map((entry) => entry.path),
+      previewPath,
+      currentPath,
+    })
+    const targetPath = targetResolution.targetPath
+    if (targetResolution.error || !targetPath) {
+      setError(targetResolution.error ?? '새 폴더를 만들 위치를 찾을 수 없습니다.')
+      return
+    }
     if (nextName.trim() === '') return
     if (actionInProgress) return
     setActionInProgress(true)
@@ -3698,11 +3733,11 @@ export default function App() {
         onClose={() => setPdfModalOpen(false)}
         onExtracted={() => {
           if (currentPath) {
-            void loadFolders(currentPath)
+            void loadFolders(currentPath, { showLoading: false })
           }
           const targetPreview = previewPath || currentPath
           if (targetPreview) {
-            void loadPreviewEntries(targetPreview, { preserveExpandedState: true }).finally(() => {
+            void loadPreviewEntries(targetPreview, { preserveExpandedState: true, showLoading: false }).finally(() => {
               refreshFolderCompletionStatus()
             })
           } else {
@@ -3713,7 +3748,7 @@ export default function App() {
           setSelectedEntryIds((prev) => prev.map((id) => (id === oldPath ? newPath : id)))
           const targetPreview = previewPath || currentPath
           if (targetPreview) {
-            void loadPreviewEntries(targetPreview, { preserveExpandedState: true }).finally(() => {
+            void loadPreviewEntries(targetPreview, { preserveExpandedState: true, showLoading: false }).finally(() => {
               refreshFolderCompletionStatus()
             })
           } else {
@@ -3730,7 +3765,7 @@ export default function App() {
         onMerged={() => {
           const targetPreview = previewPath || currentPath
           if (targetPreview) {
-            void loadPreviewEntries(targetPreview, { preserveExpandedState: true }).finally(() => {
+            void loadPreviewEntries(targetPreview, { preserveExpandedState: true, showLoading: false }).finally(() => {
               refreshFolderCompletionStatus()
             })
           } else {

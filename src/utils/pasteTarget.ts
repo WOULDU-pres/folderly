@@ -12,6 +12,11 @@ interface ResolvePasteTargetInput {
   currentPath: string
 }
 
+interface ResolveFolderTargetMessages {
+  ambiguousSelection: string
+  noTarget: string
+}
+
 function normalizePaths(paths: string[]): string[] {
   const deduped: string[] = []
 
@@ -26,18 +31,21 @@ function normalizePaths(paths: string[]): string[] {
   return deduped
 }
 
-export function resolvePasteTarget({
-  selectedFolderTargets,
-  previewPath,
-  currentPath,
-}: ResolvePasteTargetInput): PasteTargetResolution {
+function resolveFolderTarget(
+  {
+    selectedFolderTargets,
+    previewPath,
+    currentPath,
+  }: ResolvePasteTargetInput,
+  messages: ResolveFolderTargetMessages,
+): PasteTargetResolution {
   const normalizedFolderTargets = normalizePaths(selectedFolderTargets)
 
   if (normalizedFolderTargets.length > 1) {
     return {
       source: 'none',
       targetPath: null,
-      error: '여러 폴더가 선택되어 붙여넣기 대상이 모호합니다. 폴더를 1개만 선택하세요.',
+      error: messages.ambiguousSelection,
     }
   }
 
@@ -70,6 +78,42 @@ export function resolvePasteTarget({
   return {
     source: 'none',
     targetPath: null,
-    error: '붙여넣기 대상 폴더를 찾을 수 없습니다.',
+    error: messages.noTarget,
   }
+}
+
+export function resolvePasteTarget({
+  selectedFolderTargets,
+  previewPath,
+  currentPath,
+}: ResolvePasteTargetInput): PasteTargetResolution {
+  return resolveFolderTarget(
+    {
+      selectedFolderTargets,
+      previewPath,
+      currentPath,
+    },
+    {
+      ambiguousSelection: '여러 폴더가 선택되어 붙여넣기 대상이 모호합니다. 폴더를 1개만 선택하세요.',
+      noTarget: '붙여넣기 대상 폴더를 찾을 수 없습니다.',
+    },
+  )
+}
+
+export function resolveCreateFolderTarget({
+  selectedFolderTargets,
+  previewPath,
+  currentPath,
+}: ResolvePasteTargetInput): PasteTargetResolution {
+  return resolveFolderTarget(
+    {
+      selectedFolderTargets,
+      previewPath,
+      currentPath,
+    },
+    {
+      ambiguousSelection: '여러 폴더가 선택되어 새 폴더 위치가 모호합니다. 폴더를 1개만 선택하세요.',
+      noTarget: '새 폴더를 만들 위치를 찾을 수 없습니다.',
+    },
+  )
 }

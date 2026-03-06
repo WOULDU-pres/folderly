@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { resolvePasteTarget } from './pasteTarget'
+import { resolveCreateFolderTarget, resolvePasteTarget } from './pasteTarget'
 
 describe('resolvePasteTarget', () => {
   it('uses a single selected folder target first', () => {
@@ -81,5 +81,47 @@ describe('resolvePasteTarget', () => {
     expect(result.source).toBe('none')
     expect(result.targetPath).toBeNull()
     expect(result.error).toContain('붙여넣기 대상')
+  })
+})
+
+describe('resolveCreateFolderTarget', () => {
+  it('uses a single selected folder target first', () => {
+    const result = resolveCreateFolderTarget({
+      selectedFolderTargets: ['C:/dest/folder'],
+      previewPath: 'C:/preview',
+      currentPath: 'C:/current',
+    })
+
+    expect(result).toEqual({
+      source: 'selected-folder',
+      targetPath: 'C:/dest/folder',
+      error: null,
+    })
+  })
+
+  it('rejects multiple selected folders as ambiguous', () => {
+    const result = resolveCreateFolderTarget({
+      selectedFolderTargets: ['C:/dest/a', 'C:/dest/b'],
+      previewPath: 'C:/preview',
+      currentPath: 'C:/current',
+    })
+
+    expect(result.source).toBe('none')
+    expect(result.targetPath).toBeNull()
+    expect(result.error).toContain('새 폴더 위치가 모호')
+  })
+
+  it('falls back to preview path when no folder is selected', () => {
+    const result = resolveCreateFolderTarget({
+      selectedFolderTargets: [],
+      previewPath: 'C:/preview',
+      currentPath: 'C:/current',
+    })
+
+    expect(result).toEqual({
+      source: 'preview-path',
+      targetPath: 'C:/preview',
+      error: null,
+    })
   })
 })
